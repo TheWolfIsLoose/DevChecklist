@@ -1,25 +1,11 @@
 --[[
     Dev Checklist: a small in-game list of what to test, for any addon project.
 
-    Rounds: one per project id (usually an addon name). A round is a name plus
-    items; each item is { area, text, send } (or { area =, text =, send = }):
-    area groups items under a heading, send says what to report back
-    ("screenshot", "log", "yes / no"; optional). Registering a round for one
-    id never touches another id's round or ticks.
-
-    Three ways in:
-      1. Code, at load:   DevChecklist:Register("MyAddon", "v1.2 round", { {"login", "No errors.", "yes / no"} })
-                          DevChecklist:Add("MyAddon", "bags", "Bag opens.")       -- this session only
-      2. Saved ("park"):  DevChecklist:Park("MyAddon", "later", "Retest X.")      -- kept across sessions
-                          DevChecklist:AddGroup("Raid night")                     -- an empty saved group
-                          In the window: + in the title bar adds a group, + on a group adds tasks.
-                          /dc add [area:] text                                    -- parks under "Parked"
-      3. A round file:    DevChecklist_Rounds["MyAddon"] = { round = "...", items = { ... } }
-                          dropped in Rounds/ and listed in the toc (older format, still read).
-
-    Ticks are saved per id and item text in DevChecklistDB.done[id][text], so
-    whoever wrote the round can read results from SavedVariables. The window
-    shows at login while anything is unticked; /dc shows or hides it.
+    Every task belongs to a group id (usually an addon name). Tasks come
+    from code (DevChecklist:Register / :Add for this session, :Park / :Import
+    saved), round files in Rounds/, or the window (+, Import, /dc add). One
+    id never touches another id's tasks or ticks. Ticks are saved in
+    DevChecklistDB.done[id][task text]. README.md has the full guide and API.
 
     Look: near-black panels, 1px black edges, Expressway. When
     atrocityEssentials is loaded it follows the player's accent and font;
@@ -37,7 +23,7 @@ local MUTED = { 0.5, 0.5, 0.5 }        -- muted text
 local db, frame, Layout
 local editing                          -- open inline form: { kind = "group" } or { kind = "task", id =, area = }
 local armed = {}                       -- group id -> time its delete was armed
-local pending = {}                     -- Park() calls made before our saved data loaded
+local pending = {}                     -- Park / AddGroup / Import calls made before our saved data loaded
 
 -- Look --------------------------------------------------------------------
 
@@ -261,7 +247,7 @@ end
 -- Save one item for later (kept across sessions until removed).
 function DC:Park(id, area, text, send)
     CheckId(id, "Park")
-    if not db then pending[#pending + 1] = { id, area, text, send } return end
+    if not db then pending[#pending + 1] = function() DC:Park(id, area, text, send) end return end
     db.parked[id] = db.parked[id] or {}
     table.insert(db.parked[id], { area, text, send })
     DC:Refresh()
@@ -270,9 +256,10 @@ end
 -- Add a markdown list (see ParseMarkdown) to the saved checklist. A "# Name"
 -- matching an existing round or group adds to it. Tasks already there (same
 -- text in the same group) are skipped, so pasting twice adds nothing.
--- Returns how many were added.
+-- Returns how many were added (0 when called before saved data loads; it
+-- still runs then).
 function DC:Import(md, id)
-    if not db then return 0 end
+    if not db then pending[#pending + 1] = function() DC:Import(md, id) end return 0 end
     local have, touched, n = {}, {}, 0
     for _, r in ipairs(Rounds()) do
         have[r.id] = {}
@@ -298,7 +285,7 @@ DC.ParseMarkdown = ParseMarkdown
 -- A saved group with no items yet (kept until deleted).
 function DC:AddGroup(id)
     CheckId(id, "AddGroup")
-    if not db then return end
+    if not db then pending[#pending + 1] = function() DC:AddGroup(id) end return end
     db.groups[id] = true
     DC:Refresh()
 end
@@ -691,7 +678,7 @@ ev:SetScript("OnEvent", function(_, event, name)
         db.collapsed = db.collapsed or {}
         db.parked = db.parked or {}
         db.groups = db.groups or {}
-        for _, p in ipairs(pending) do DC:Park(p[1], p[2], p[3], p[4]) end
+        for _, fn in ipairs(pending) do fn() end
         pending = nil
         return
     end

@@ -44,6 +44,8 @@ DevChecklist_Rounds.Demo = { round = "r1", items = { { "login", "No Lua errors."
 local DC = DevChecklist
 -- before saved data: Park queues
 DC:Park("Early", "a", "Queued item")
+DC:AddGroup("EarlyGroup")
+assert(DC:Import("# EarlyImport\n- [ ] Queued import.") == 0, "import before load reports 0")
 -- old v1 saved data
 DevChecklistDB = { done = { ["No Lua errors."] = true, ["Not a current item"] = true }, collapsed = {}, point = {"TOPLEFT","TOPLEFT",5,5} }
 local fire = handlers[1]
@@ -55,6 +57,7 @@ assert(db.v == 2, "migrated")
 assert(db.done.Demo and db.done.Demo["No Lua errors."], "tick moved")
 assert(db.done["Not a current item"] == nil, "stale flat tick dropped")
 assert(db.parked.Early and #db.parked.Early == 1, "queued park flushed")
+assert(db.groups.EarlyGroup and db.parked.EarlyImport and #db.parked.EarlyImport == 1, "queued group and import flushed")
 local d, t = DC:Progress("Demo"); assert(d == 1 and t == 2, "progress "..d.."/"..t)
 -- API
 DC:Register("MyAddon", "r1", { {"login","A","yes / no"}, {area="bags", text="B"}, {"x", ""} })
