@@ -1,0 +1,9 @@
+## Interface: 120100, 120105
+## Title: Dev Checklist
+## Notes: In-game list of what to test, for any addon project. Rounds come from code (DevChecklist:Register), the window, /dc add, or round files. /dc shows or hides it.
+## Author: Jakerator
+## Version: 2.1.0
+## OptionalDeps: atrocityEssentials, LibSharedMedia-3.0
+## SavedVariables: DevChecklistDB
+
+DevChecklist.lua
