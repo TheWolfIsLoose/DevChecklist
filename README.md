@@ -18,7 +18,33 @@ DevChecklist:AddGroup("Raid night")                              -- an empty sav
 
 **In the window:** the **+** in the title bar adds a group; the **+** on a group opens a row to type tasks into (Area, Task, Send; Enter adds, Esc closes). Tasks you add have an **x** to delete them; groups you made have an **x** that deletes on the second click. Everything added in the window is saved.
 
-**Paste markdown:** **Import** in the title bar opens a paste box. `# Name` starts a group (an existing round or group with that name gets the tasks), `## Name` sets the area, and `-`, `*`, `+` or `1.` lines become tasks. `[x]` comes in ticked. Tasks already in that group are skipped, so pasting twice is harmless. From code: `DevChecklist:Import(markdown)`.
+**Paste markdown:** **Import** in the title bar opens a paste box; paste a list and click **Import**. The tasks are added to what's already there:
+
+- `# Name` picks the group. A round or group with that name gets the tasks; otherwise a new group is made ("Imported" if there's no heading).
+- `## Name` (or deeper) sets the area for the tasks below it.
+- Only checkbox lines are tasks: `- [ ]`, `* [ ]`, `+ [ ]` or `1. [ ]`. `[x]` comes in already ticked.
+- Everything else (plain bullets, paragraphs) is a note and is skipped. Bold and code marks are stripped.
+- Tasks already in that group are skipped, so pasting twice adds nothing.
+
+Say in each task how to confirm it (a screenshot, yes / no, a log). Sample:
+
+```markdown
+# MyAddon
+
+Round 3: new bag sort. Lines like this one are skipped.
+
+## Login
+- [ ] No Lua errors on login. (yes / no)
+- [ ] The welcome line prints once, not on every reload.
+
+## Bags
+- [ ] Open your bags: a Sort button sits in the title bar. (screenshot)
+- [ ] Click Sort twice: items don't move the second time.
+- [x] Bags still open at the bank.
+- Plain bullets like this one are notes, not tasks.
+```
+
+From code: `DevChecklist:Import(markdown)`.
 
 **In chat:** `/dc add [area:] text` adds a task to a "Parked" group.
 

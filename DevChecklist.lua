@@ -150,9 +150,10 @@ end
 local function Trim(t) return (t or ""):match("^%s*(.-)%s*$") end
 
 -- Markdown to tasks: "# Name" starts a group (default "Imported"), "## Name"
--- (or deeper) sets the area, list lines ("-", "*", "+", "1." / "1)") become
--- tasks. "[ ]" boxes are dropped; "[x]" comes in ticked. Bold and code marks
--- are stripped (the game shows them literally). Anything else is ignored.
+-- (or deeper) sets the area, and only checkbox lines are tasks ("- [ ]",
+-- "* [ ]", "1. [ ]"; "[x]" comes in ticked). Plain bullets and other lines are
+-- notes and skipped. Bold and code marks are stripped (the game shows them
+-- literally).
 local function ParseMarkdown(md, id)
     local out, area = {}, ""
     id = id or "Imported"
@@ -168,9 +169,8 @@ local function ParseMarkdown(md, id)
             local text = line:match("^%s*[-*+]%s+(.+)$") or line:match("^%s*%d+[.)]%s+(.+)$")
             if text then
                 local box, rest = text:match("^%[([ xX]?)%]%s*(.*)$")
-                if box then text = rest end
-                text = Trim(text:gsub("%*%*", ""):gsub("__", ""):gsub("`", ""))
-                if text ~= "" then
+                text = Trim((rest or ""):gsub("%*%*", ""):gsub("__", ""):gsub("`", ""))
+                if box and text ~= "" then
                     out[#out + 1] = { id = id, area = area, text = text, done = box == "x" or box == "X" }
                 end
             end
@@ -480,7 +480,7 @@ local function ImportForm(body, y)
         ph:SetShown(text == "")
         local n = #ParseMarkdown(text)
         hint:SetText(n > 0 and (n .. (n == 1 and " task" or " tasks") .. " found. Esc closes.")
-            or "# starts a group, ## an area; - or 1. lines are tasks. Esc closes.")
+            or "# starts a group, ## an area; - [ ] lines are tasks. Esc closes.")
     end
     box:SetScript("OnTextChanged", function(self) editing.text = self:GetText(); Update(editing.text) end)
     box:SetScript("OnEscapePressed", function(self) self:ClearFocus(); editing = nil; Layout() end)
