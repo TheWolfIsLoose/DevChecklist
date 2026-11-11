@@ -135,7 +135,49 @@ local function Field(parent, width, placeholder)
     return e
 end
 
+-- Text button: control fill, 1px edge, grey hover wash.
+local function Button(parent, label, width)
+    local b = CreateFrame("Button", nil, parent, "BackdropTemplate")
+    b:SetSize(width, 20)
+    Panel(b, 0.055, 0.95)
+    Hover(b)
+    local fs = Text(b, 11)
+    fs:SetPoint("CENTER")
+    fs:SetText(label)
+    return b
+end
+
 local function Trim(t) return (t or ""):match("^%s*(.-)%s*$") end
+
+-- Markdown to tasks: "# Name" starts a group (default "Imported"), "## Name"
+-- (or deeper) sets the area, list lines ("-", "*", "+", "1." / "1)") become
+-- tasks. "[ ]" boxes are dropped; "[x]" comes in ticked. Bold and code marks
+-- are stripped (the game shows them literally). Anything else is ignored.
+local function ParseMarkdown(md, id)
+    local out, area = {}, ""
+    id = id or "Imported"
+    for line in (md or ""):gmatch("[^\r\n]+") do
+        local h, title = line:match("^%s*(#+)%s+(.-)[%s#]*$")
+        if h then
+            if #h == 1 then
+                if title ~= "" then id, area = title, "" end
+            else
+                area = title
+            end
+        else
+            local text = line:match("^%s*[-*+]%s+(.+)$") or line:match("^%s*%d+[.)]%s+(.+)$")
+            if text then
+                local box, rest = text:match("^%[([ xX]?)%]%s*(.*)$")
+                if box then text = rest end
+                text = Trim(text:gsub("%*%*", ""):gsub("__", ""):gsub("`", ""))
+                if text ~= "" then
+                    out[#out + 1] = { id = id, area = area, text = text, done = box == "x" or box == "X" }
+                end
+            end
+        end
+    end
+    return out
+end
 
 -- Data --------------------------------------------------------------------
 
@@ -225,6 +267,34 @@ function DC:Park(id, area, text, send)
     DC:Refresh()
 end
 
+-- Add a markdown list (see ParseMarkdown) to the saved checklist. A "# Name"
+-- matching an existing round or group adds to it. Tasks already there (same
+-- text in the same group) are skipped, so pasting twice adds nothing.
+-- Returns how many were added.
+function DC:Import(md, id)
+    if not db then return 0 end
+    local have, touched, n = {}, {}, 0
+    for _, r in ipairs(Rounds()) do
+        have[r.id] = {}
+        for _, x in ipairs(r.items) do have[r.id][x.text] = true end
+    end
+    for _, it in ipairs(ParseMarkdown(md, id)) do
+        have[it.id] = have[it.id] or {}
+        if not have[it.id][it.text] then
+            have[it.id][it.text] = true
+            db.parked[it.id] = db.parked[it.id] or {}
+            table.insert(db.parked[it.id], { it.area, it.text })
+            if it.done then SetDone(it.id, it.text, true) end
+            touched[it.id] = true
+            n = n + 1
+        end
+    end
+    for k in pairs(touched) do db.collapsed[k] = false end
+    DC:Refresh()
+    return n
+end
+DC.ParseMarkdown = ParseMarkdown
+
 -- A saved group with no items yet (kept until deleted).
 function DC:AddGroup(id)
     CheckId(id, "AddGroup")
@@ -299,6 +369,13 @@ local function Build()
     local add = Glyph(head, 9, true, "New Group")
     add:SetPoint("RIGHT", close, "LEFT", -2, 0)
     add:SetScript("OnClick", function() editing = { kind = "group" }; Layout() end)
+    local imp = Button(head, "Import", 48)
+    imp:SetHeight(18)
+    imp:SetPoint("RIGHT", add, "LEFT", -4, 0)
+    imp:SetScript("OnClick", function()
+        if editing and editing.kind == "import" then editing = nil else editing = { kind = "import" } end
+        Layout()
+    end)
 
     local scroll = CreateFrame("ScrollFrame", nil, frame)
     scroll:SetPoint("TOPLEFT", 0, -HEAD)
@@ -377,6 +454,51 @@ local function TaskForm(body, y, id)
     return 44
 end
 
+-- Paste box for a markdown list; Import adds it, Esc closes.
+-- ponytail: no scroll frame, so a long paste is clipped in the box (all of it
+-- still imports; the count below says how much). Add one if that bothers.
+local function ImportForm(body, y)
+    local box = CreateFrame("EditBox", nil, body, "BackdropTemplate")
+    box:SetPoint("TOPLEFT", PAD, y - 2)
+    box:SetSize(W - 2 * PAD, 120)
+    Panel(box, 0.031, 1)
+    box:SetMultiLine(true)
+    box:SetAutoFocus(false)
+    box:SetFont(FontPath(), 11, "OUTLINE")
+    box:SetTextInsets(5, 5, 5, 5)
+    box:SetMaxLetters(0)
+    local ph = Text(box, 11, MUTED)
+    ph:SetPoint("TOPLEFT", 5, -5)
+    ph:SetText("Paste a markdown list")
+    local hint = Text(body, 10, NOTE)
+    hint:SetPoint("TOPLEFT", box, "BOTTOMLEFT", 0, -4)
+    hint:SetWidth(W - 2 * PAD - 80)
+    hint:SetWordWrap(true)
+    local ok = Button(body, "Import", 70)
+    ok:SetPoint("TOPRIGHT", box, "BOTTOMRIGHT", 0, -4)
+    local function Update(text)
+        ph:SetShown(text == "")
+        local n = #ParseMarkdown(text)
+        hint:SetText(n > 0 and (n .. (n == 1 and " task" or " tasks") .. " found. Esc closes.")
+            or "# starts a group, ## an area; - or 1. lines are tasks. Esc closes.")
+    end
+    box:SetScript("OnTextChanged", function(self) editing.text = self:GetText(); Update(editing.text) end)
+    box:SetScript("OnEscapePressed", function(self) self:ClearFocus(); editing = nil; Layout() end)
+    box:HookScript("OnEditFocusGained", function(self) self:SetBackdropBorderColor(Brand()) end)
+    box:HookScript("OnEditFocusLost", function(self) self:SetBackdropBorderColor(0, 0, 0, 1) end)
+    ok:SetScript("OnClick", function()
+        local text = box:GetText()
+        editing = nil
+        local n = DC:Import(text)
+        Print(n == 0 and "nothing new to import." or ("imported " .. n .. (n == 1 and " task." or " tasks.")))
+        Layout()
+    end)
+    box:SetText(editing.text or "")
+    Update(editing.text or "")
+    box:SetFocus()
+    return 152
+end
+
 -- ponytail: rebuilds the body on every change (old widgets hidden, not
 -- reused). Fine for a dev window; pool rows if it ever feels slow.
 Layout = function()
@@ -402,6 +524,10 @@ Layout = function()
         name:SetFocus()
         formTop, formH = -y, 30
         y = y - 30
+    elseif editing and editing.kind == "import" then
+        formTop = -y
+        formH = ImportForm(body, y)
+        y = y - formH
     end
 
     for _, r in ipairs(Rounds()) do

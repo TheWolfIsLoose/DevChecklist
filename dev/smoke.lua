@@ -82,7 +82,7 @@ local frameObj = Newest(function(f) return f._name == "DevChecklistFrame" end)
 local headObj = Newest(function(f) return f._parent == frameObj and f._type == "Frame" end)
 local btns = {}
 for _, f in ipairs(ALL) do if f._parent == headObj and f._type == "Button" then btns[#btns+1] = f end end
-assert(#btns == 2, "close and + in the title bar")
+assert(#btns == 3, "close, + and Import in the title bar")
 btns[2]._OnClick(btns[2])                                         -- + New Group
 local name = Newest(function(f) return f._type == "EditBox" end)
 name._text = "  Raid night "; name._OnEnterPressed(name)          -- Enter
@@ -121,5 +121,37 @@ x = GroupX("Temp"); x._OnClick(x); now = now + 5
 for _, f in ipairs(timers) do f() end
 x = GroupX("Temp"); x._OnClick(x)
 assert(db.groups.Temp, "lapsed arm: one click doesn't delete")
+-- markdown import
+local md = table.concat({
+  "Intro line, ignored.", "# Demo", "## login", "- [ ] No Lua errors.", "- [x] **Login** sound plays.",
+  "## bags", "* Bag `opens` fast.", "1. Sort works.", "  2) Nested numbered.", "---", "#", "### deep", "+ Deep item.",
+  "# Fresh group", "- First fresh.", "-not a list", "- ", "- [ ]",
+}, "\r\n")
+local items = DC.ParseMarkdown(md)
+assert(#items == 7, "parsed "..#items)
+assert(items[1].id == "Demo" and items[1].area == "login" and items[1].text == "No Lua errors." and not items[1].done, "item 1")
+assert(items[2].text == "Login sound plays." and items[2].done, "ticked + bold")
+assert(items[3].text == "Bag opens fast." and items[3].area == "bags", "code marks")
+assert(items[5].text == "Nested numbered.", "nested numbered")
+assert(items[6].area == "deep" and items[6].id == "Demo", "### sets area, bare # ignored")
+assert(items[7].id == "Fresh group" and items[7].area == "", "new group resets area")
+assert(DC.ParseMarkdown("- x")[1].id == "Imported", "default group")
+local before = select(2, DC:Progress("Demo"))
+local n = DC:Import(md)
+assert(n == 6, "imported "..n)                          -- "No Lua errors." already in Demo's round
+assert(select(2, DC:Progress("Demo")) == before + 5, "appended to existing round")
+assert(DC:IsDone("Demo", "Login sound plays."), "[x] ticked")
+assert(db.collapsed.Demo == false and db.collapsed["Fresh group"] == false, "unfolded")
+assert(DC:Import(md) == 0, "re-import adds nothing")
+-- through the window: Import button, paste, Import
+btns[3]._OnClick(btns[3])
+local paste = Newest(function(f) return f._type == "EditBox" and not f._OnTabPressed end)
+paste._text = "# Window\n- From the box."; paste._OnTextChanged(paste)
+local go
+for i = #KIDS, 1, -1 do local fs = KIDS[i]; if fs._text == "Import" and fs._parent._parent == paste._parent then go = fs._parent; break end end
+go._OnClick(go)
+assert(db.parked.Window and db.parked.Window[1][2] == "From the box.", "window import")
+btns[3]._OnClick(btns[3]); paste = Newest(function(f) return f._type == "EditBox" and not f._OnTabPressed end)
+paste._OnEscapePressed(paste)
 print = io.write
 io.write("SMOKE OK\n")

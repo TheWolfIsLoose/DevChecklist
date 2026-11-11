@@ -18,6 +18,8 @@ DevChecklist:AddGroup("Raid night")                              -- an empty sav
 
 **In the window:** the **+** in the title bar adds a group; the **+** on a group opens a row to type tasks into (Area, Task, Send; Enter adds, Esc closes). Tasks you add have an **x** to delete them; groups you made have an **x** that deletes on the second click. Everything added in the window is saved.
 
+**Paste markdown:** **Import** in the title bar opens a paste box. `# Name` starts a group (an existing round or group with that name gets the tasks), `## Name` sets the area, and `-`, `*`, `+` or `1.` lines become tasks. `[x]` comes in ticked. Tasks already in that group are skipped, so pasting twice is harmless. From code: `DevChecklist:Import(markdown)`.
+
 **In chat:** `/dc add [area:] text` adds a task to a "Parked" group.
 
 **As a file:** put `DevChecklist_Rounds["MyAddon"] = { round = "...", items = { ... } }` in `Rounds\MyAddon.lua` and list it in `DevChecklist.toc`.
