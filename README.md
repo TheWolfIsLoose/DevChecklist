@@ -2,7 +2,7 @@
 
 An in-game checklist of what to test. A tester ticks tasks off as they play,
 and the ticks are saved, so whoever wrote the tasks can read the results
-afterwards (passes, fails and a short note for each fail). Any number of addons can use it at once without touching each
+afterwards (passes, fails with a short note, and where the tester was when a task failed). Any number of addons can use it at once without touching each
 other's lists.
 
 - [Using the checklist](#using-the-checklist)
@@ -149,9 +149,28 @@ DevChecklistDB = {
         round = "v1.2: bag sort", build = "a1b2c3d", pass = 1, open = 1,
         fail = { { text = "Open your bags: a Sort button shows.", note = "button missing at 1080p" } },
     } },
+    snap = { ["MyAddon"] = { ["Open your bags: a Sort button shows."] = {   -- taken when the task failed
+        at = "2026-11-17 21:04:12", zone = "Dornogal", combat = "no",
+        spec = "Fire", group = 0, build = "a1b2c3d",
+        log = { "21:02:40 reload: Dornogal", "21:03:55 [MyAddon] bags opened" },   -- last 20 log lines
+    } } },
+    log = { "21:02:40 reload: Dornogal", "21:03:10 combat in", ... },   -- flight recorder, last 100 lines
     parked = { ... }, groups = { ... },   -- tasks and groups added in game
 }
 ```
+
+### 5. Flight recorder
+
+While a round from `Register`, `Add` or a round file has a task not yet
+passed, Dev Checklist keeps a short log: login and reload, zone changes,
+combat in and out, and Lua errors when BugGrabber is loaded. Add your own
+lines with `DevChecklist:Log("MyAddon", "bags opened")`. Only the last 100
+lines are kept.
+
+When the tester fails a task, a snapshot is saved with it in `snap`: time,
+zone (with instance and difficulty), combat, spec, group size, your build
+label and the last 20 log lines. Passing or clearing the task drops it. With
+no round open, nothing is recorded and no events are watched.
 
 ### API
 
@@ -166,6 +185,7 @@ DevChecklistDB = {
 | `:Clear(id)` | Delete everything for this id: round, saved tasks, passes and fails | Yes |
 | `:IsDone(id, text)` | Is this task ticked? | |
 | `:Progress(id)` | Returns `passed, total` | |
+| `:Log(id, text)` | Add a line to the flight recorder (only while a round is open) | Last 100 lines |
 | `:Show()` / `:Hide()` / `:Toggle()` | The window | |
 | `:Refresh()` | Redraw the window if it's open | |
 

@@ -35,6 +35,14 @@ GetTime = function() return now end
 local timers = {}
 C_Timer = { After = function(_, f) timers[#timers+1] = f end }
 SlashCmdList = {}
+date = os.date
+local zone, inCombat = "Dornogal", false
+GetRealZoneText = function() return zone end
+GetInstanceInfo = function() return "Dornogal", "none", 0, "" end
+InCombatLockdown = function() return inCombat end
+GetSpecialization = function() return 2 end
+GetSpecializationInfo = function(i) return 63, "Fire" end
+GetNumGroupMembers = function() return 0 end
 local printed = {}
 print = function(s) printed[#printed+1] = s end
 
@@ -189,12 +197,44 @@ do
   assert(db.done.PF["Item B"] and not db.fail.PF["Item B"], "left click with the note box open passes")
   for i = nAll + 1, #ALL do assert(ALL[i]._type ~= "EditBox", "note box closed after the left click") end
   Row("Item B")._OnClick(Row("Item B"), "LeftButton")      -- clear it again; the report below expects Item B open
+  -- flight recorder: events and Log lines while a round is open, snapshot on fail
+  local recEv = handlers[1] == fire and handlers[2] or handlers[1]
+  assert(recEv ~= fire, "recorder has its own event frame")
+  recEv(nil, "PLAYER_ENTERING_WORLD", false, true)
+  recEv(nil, "PLAYER_REGEN_DISABLED"); inCombat = true
+  DC:Log("PF", "bags opened")
+  assert(db.log[#db.log]:find("[PF] bags opened", 1, true) and db.log[#db.log - 2]:find("reload: Dornogal", 1, true), "events logged")
+  for i = 1, 130 do DC:Log("PF", "spam " .. i) end
+  assert(#db.log == 100 and db.log[100]:find("spam 130", 1, true), "log trimmed to 100")
+  Row("Item A")._OnClick(Row("Item A"), "RightButton")
+  local s = db.snap.PF["Item A"]
+  assert(s and s.zone == "Dornogal" and s.combat == "yes" and s.spec == "Fire" and s.group == 0 and s.build == "abc1234", "snapshot fields")
+  assert(#s.log == 20 and s.log[20]:find("spam 130", 1, true), "snapshot has the last 20 lines")
+  note = Newest(function(f) return f._type == "EditBox" and f._OnEnterPressed and not f._OnTabPressed end)
+  DC:Log("PF", "later line"); note._text = "late note"; note._OnEnterPressed(note)
+  assert(db.snap.PF["Item A"] == s and db.fail.PF["Item A"] == "late note", "note keeps the first snapshot")
+  Row("Item A")._OnClick(Row("Item A"), "LeftButton")
+  assert(not db.snap.PF["Item A"] and db.done.PF["Item A"], "pass drops the snapshot")
+  assert(db.snap.PF["Item C"], "Item C kept its snapshot")
+  zone = ""; local inst = { "Murder Row", "scenario", 0, "" }
+  local oldInfo = GetInstanceInfo; GetInstanceInfo = function() return unpack(inst) end
+  recEv(nil, "PLAYER_ENTERING_WORLD", true, false)
+  assert(db.log[#db.log]:find("login: Murder Row (Murder Row, scenario)", 1, true), "empty zone and difficulty filled: " .. db.log[#db.log])
+  GetInstanceInfo, zone = oldInfo, "Dornogal"
   handlers[1](nil, "PLAYER_LOGOUT")
   local rep = db.report.PF
   assert(rep.round == "r1" and rep.build == "abc1234" and rep.pass == 1 and rep.open == 1 and #rep.fail == 1, "report counts")
   assert(rep.fail[1].text == "Item C" and rep.fail[1].note == "wrong sound", "report fail entry")
   assert(select(1, DC:Progress("PF")) == 1, "fails are not passes")
-  DC:Clear("PF"); assert(not db.fail.PF, "clear drops fails")
+  DC:Clear("PF"); assert(not db.fail.PF and not db.snap.PF, "clear drops fails and snapshots")
+  -- no round with an unpassed task: nothing is recorded
+  for id in pairs(DevChecklist_Rounds) do DC:Clear(id) end
+  local n = #db.log
+  DC:Log("PF", "after clear")
+  assert(#db.log == n, "log stops when no round is open")
+  DC:Register("Again", "r2", { {"a", "One"} })
+  DC:Log("Again", "back on")
+  assert(db.log[#db.log]:find("back on", 1, true), "recording resumes with a new round")
 end
 print = io.write
 io.write("SMOKE OK\n")
