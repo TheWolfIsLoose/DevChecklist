@@ -662,6 +662,8 @@ Layout = function()
                     Layout()
                     return
                 end
+                -- A left click moves on: close an open note box (this item's or another's).
+                if editing and editing.kind == "note" then editing = nil; wasFailed = true end
                 SetDone(r.id, it.text, not Done(r.id, it.text))
                 if wasFailed then Layout() return end
                 Paint()

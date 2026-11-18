@@ -181,6 +181,14 @@ do
   Row("Item C")._OnClick(Row("Item C"), "RightButton")
   note = Newest(function(f) return f._type == "EditBox" and f._OnEnterPressed and not f._OnTabPressed end)
   note._text = "wrong sound"; note._OnEnterPressed(note)
+  -- left click while the note box is still open (no Enter): fail clears, box goes
+  Row("Item B")._OnClick(Row("Item B"), "RightButton")
+  assert(db.fail.PF["Item B"] == "", "failed again")
+  local nAll = #ALL
+  Row("Item B")._OnClick(Row("Item B"), "LeftButton")
+  assert(db.done.PF["Item B"] and not db.fail.PF["Item B"], "left click with the note box open passes")
+  for i = nAll + 1, #ALL do assert(ALL[i]._type ~= "EditBox", "note box closed after the left click") end
+  Row("Item B")._OnClick(Row("Item B"), "LeftButton")      -- clear it again; the report below expects Item B open
   handlers[1](nil, "PLAYER_LOGOUT")
   local rep = db.report.PF
   assert(rep.round == "r1" and rep.build == "abc1234" and rep.pass == 1 and rep.open == 1 and #rep.fail == 1, "report counts")
