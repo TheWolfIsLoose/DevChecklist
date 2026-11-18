@@ -212,23 +212,127 @@ local function Failed(id, text) return db and db.fail[id] and db.fail[id][text] 
 
 local function Drop(t, id) if t[id] and not next(t[id]) then t[id] = nil end end
 
+-- Flight recorder ---------------------------------------------------------
+-- While a code or file round has an unpassed task, a few events (login and
+-- reload, zone change, combat in/out, Lua errors when BugGrabber is loaded)
+-- and DevChecklist:Log lines go into DevChecklistDB.log (last LOG_MAX lines).
+-- Each fail saves a snapshot of where the tester was in DevChecklistDB.snap.
+-- No round open: no events registered, nothing recorded.
+
+local LOG_MAX, SNAP_LINES = 100, 20
+local rec                              -- event frame, made the first time a round opens
+local recording = false
+
+local function AddLog(msg)
+    local log = db.log
+    log[#log + 1] = date("%H:%M:%S") .. " " .. msg
+    while #log > LOG_MAX do table.remove(log, 1) end
+end
+
+local function ZoneLine()
+    local name, kind, _, diff = GetInstanceInfo()
+    local zone = GetRealZoneText() or ""
+    if kind and kind ~= "none" then return zone .. " (" .. (name or "?") .. ", " .. (diff or kind) .. ")" end
+    return zone
+end
+
+local function OnBug(_, err)
+    local m = type(err) == "table" and err.message or err
+    AddLog("error: " .. tostring(m):gsub("[\r\n]+", " "):sub(1, 160))
+end
+
+local function OnRecEvent(_, event, a, b)
+    if event == "PLAYER_ENTERING_WORLD" then
+        AddLog((a and "login" or b and "reload" or "loading screen") .. ": " .. ZoneLine())
+    elseif event == "ZONE_CHANGED_NEW_AREA" then
+        AddLog("zone: " .. ZoneLine())
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        AddLog("combat in")
+    else
+        AddLog("combat out")
+    end
+end
+
+local function SetRecording(on)
+    if on == recording then return end
+    recording = on
+    local BG = BugGrabber
+    if on then
+        if not rec then rec = CreateFrame("Frame"); rec:SetScript("OnEvent", OnRecEvent) end
+        rec:RegisterEvent("PLAYER_ENTERING_WORLD")
+        rec:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+        rec:RegisterEvent("PLAYER_REGEN_DISABLED")
+        rec:RegisterEvent("PLAYER_REGEN_ENABLED")
+        if BG and BG.RegisterCallback then BG.RegisterCallback(rec, "BugGrabber_BugGrabbed", OnBug) end
+    else
+        rec:UnregisterAllEvents()
+        if BG and BG.UnregisterCallback then BG.UnregisterCallback(rec, "BugGrabber_BugGrabbed") end
+    end
+end
+
+-- Record while any code or file round has a task not yet passed.
+local function Arm()
+    if not db then return end
+    for id, r in pairs(DevChecklist_Rounds) do
+        if type(r) == "table" and type(r.items) == "table" then
+            for _, it in ipairs(r.items) do
+                local text = type(it) == "table" and (it.text or it[2])
+                if type(text) == "string" and text ~= "" and not Done(id, text) then SetRecording(true) return end
+            end
+        end
+    end
+    SetRecording(false)
+end
+
+local function Snapshot(id)
+    local spec = GetSpecialization and GetSpecialization()
+    if spec then spec = select(2, GetSpecializationInfo(spec)) end
+    local name, kind, _, diff = GetInstanceInfo()
+    local r = DevChecklist_Rounds[id]
+    local s = {
+        at = date("%Y-%m-%d %H:%M:%S"),
+        zone = ZoneLine(),
+        instance = (kind and kind ~= "none") and ((name or "?") .. " (" .. (diff or kind) .. ")") or "none",
+        combat = InCombatLockdown() and "yes" or "no",
+        spec = spec or "none",
+        group = GetNumGroupMembers(),
+        build = type(r) == "table" and r.build or nil,
+        log = {},
+    }
+    for i = math.max(1, #db.log - SNAP_LINES + 1), #db.log do s.log[#s.log + 1] = db.log[i] end
+    return s
+end
+
+local function DropSnap(id, text)
+    if db.snap[id] then db.snap[id][text] = nil; Drop(db.snap, id) end
+end
+
 -- Pass and fail exclude each other: setting one clears the other.
 local function SetDone(id, text, on)
     db.done[id] = db.done[id] or {}
     db.done[id][text] = on or nil
     Drop(db.done, id)
     if on and db.fail[id] then db.fail[id][text] = nil; Drop(db.fail, id) end
+    if on then DropSnap(id, text) end
+    Arm()
 end
 
--- note = nil clears the fail; a string (even "") marks it failed.
+-- note = nil clears the fail; a string (even "") marks it failed. The first
+-- fail takes a snapshot; adding the note later keeps it.
 local function SetFail(id, text, note)
     if note == nil then
         if db.fail[id] then db.fail[id][text] = nil; Drop(db.fail, id) end
+        DropSnap(id, text)
         return
     end
     db.fail[id] = db.fail[id] or {}
+    if db.fail[id][text] == nil then
+        db.snap[id] = db.snap[id] or {}
+        db.snap[id][text] = Snapshot(id)
+    end
     db.fail[id][text] = note
     if db.done[id] then db.done[id][text] = nil; Drop(db.done, id) end
+    Arm()
 end
 
 -- passed, failed counts for one round.
@@ -258,7 +362,17 @@ local function CheckId(id, fn)
     if type(id) ~= "string" or id == "" then error(("DevChecklist:%s: id must be a non-empty string"):format(fn), 3) end
 end
 
-function DC:Refresh() if frame and frame:IsShown() then Layout() end end
+function DC:Refresh()
+    Arm()
+    if frame and frame:IsShown() then Layout() end
+end
+
+-- One line in the flight recorder, e.g. DevChecklist:Log("MyAddon", "bags opened").
+-- Kept only while a round is open; otherwise does nothing.
+function DC:Log(id, msg)
+    if not recording then return end
+    AddLog("[" .. tostring(id) .. "] " .. tostring(msg))
+end
 
 -- Replace this id's round (this session). Ticks for items with the same text carry over.
 -- build (optional, e.g. a short commit hash) is shown in the header and saved in the report.
@@ -340,7 +454,7 @@ end
 function DC:Clear(id)
     CheckId(id, "Clear")
     DevChecklist_Rounds[id] = nil
-    if db then db.parked[id], db.done[id], db.fail[id], db.collapsed[id], db.groups[id] = nil, nil, nil, nil, nil end
+    if db then db.parked[id], db.done[id], db.fail[id], db.snap[id], db.collapsed[id], db.groups[id] = nil, nil, nil, nil, nil, nil end
     DC:Refresh()
 end
 
@@ -773,6 +887,8 @@ ev:SetScript("OnEvent", function(_, event, name)
         db.collapsed = db.collapsed or {}
         db.parked = db.parked or {}
         db.groups = db.groups or {}
+        db.log = db.log or {}
+        db.snap = db.snap or {}
         for _, fn in ipairs(pending) do fn() end
         pending = nil
         return
@@ -787,6 +903,7 @@ ev:SetScript("OnEvent", function(_, event, name)
         end
         db.v = 2
     end
+    Arm()
     for _, r in ipairs(Rounds()) do
         for _, it in ipairs(r.items) do
             if not Done(r.id, it.text) then DC:Show() return end
