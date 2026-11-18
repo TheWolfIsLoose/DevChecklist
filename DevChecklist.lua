@@ -288,14 +288,12 @@ local function Arm()
 end
 
 local function Snapshot(id)
-    local spec = GetSpecialization and GetSpecialization()
+    local spec = GetSpecialization()
     if spec then spec = select(2, GetSpecializationInfo(spec)) end
-    local name, kind, _, diff = GetInstanceInfo()
     local r = DevChecklist_Rounds[id]
     local s = {
         at = date("%Y-%m-%d %H:%M:%S"),
-        zone = ZoneLine(),
-        instance = (kind and kind ~= "none") and ((Nz(name) or "?") .. " (" .. (Nz(diff) or kind) .. ")") or "none",
+        zone = ZoneLine(),                    -- includes the instance and difficulty when inside one
         combat = InCombatLockdown() and "yes" or "no",
         spec = spec or "none",
         group = GetNumGroupMembers(),

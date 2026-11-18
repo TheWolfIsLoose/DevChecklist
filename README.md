@@ -150,7 +150,7 @@ DevChecklistDB = {
         fail = { { text = "Open your bags: a Sort button shows.", note = "button missing at 1080p" } },
     } },
     snap = { ["MyAddon"] = { ["Open your bags: a Sort button shows."] = {   -- taken when the task failed
-        at = "2026-11-17 21:04:12", zone = "Dornogal", instance = "none", combat = "no",
+        at = "2026-11-17 21:04:12", zone = "Dornogal", combat = "no",
         spec = "Fire", group = 0, build = "a1b2c3d",
         log = { "21:02:40 reload: Dornogal", "21:03:55 [MyAddon] bags opened" },   -- last 20 log lines
     } } },
@@ -168,9 +168,9 @@ lines with `DevChecklist:Log("MyAddon", "bags opened")`. Only the last 100
 lines are kept.
 
 When the tester fails a task, a snapshot is saved with it in `snap`: time,
-zone, instance, combat, spec, group size, your build label and the last 20
-log lines. Passing or clearing the task drops it. With no round open,
-nothing is recorded and no events are watched.
+zone (with instance and difficulty), combat, spec, group size, your build
+label and the last 20 log lines. Passing or clearing the task drops it. With
+no round open, nothing is recorded and no events are watched.
 
 ### API
 
