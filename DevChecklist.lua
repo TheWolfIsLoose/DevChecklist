@@ -4,8 +4,11 @@
     Every task belongs to a group id (usually an addon name). Tasks come
     from code (DevChecklist:Register / :Add for this session, :Park / :Import
     saved), round files in Rounds/, or the window (+, Import, /dc add). One
-    id never touches another id's tasks or ticks. Ticks are saved in
-    DevChecklistDB.done[id][task text]. README.md has the full guide and API.
+    id never touches another id's tasks or ticks. Passes are saved in
+    DevChecklistDB.done[id][task text], fails (with a one-line note) in
+    DevChecklistDB.fail[id][task text], and a per-round summary is written to
+    DevChecklistDB.report on reload and logout. README.md has the full guide
+    and API.
 
     Look: near-black panels, 1px black edges, Expressway. When
     atrocityEssentials is loaded it follows the player's accent and font;
@@ -20,6 +23,7 @@ DevChecklist_Rounds = DevChecklist_Rounds or {}
 local W, PAD, HEAD = 360, 10, 26
 local NOTE = { 0.604, 0.604, 0.604 }   -- note grey #9A9A9A
 local MUTED = { 0.5, 0.5, 0.5 }        -- muted text
+local FAIL = { 0.9, 0.3, 0.3 }         -- failed item
 local db, frame, Layout
 local editing                          -- open inline form: { kind = "group" } or { kind = "task", id =, area = }
 local armed = {}                       -- group id -> time its delete was armed
@@ -179,7 +183,7 @@ local function Rounds()
     local byId = {}
     for id, r in pairs(DevChecklist_Rounds) do
         if type(id) == "string" and type(r) == "table" and type(r.items) == "table" then
-            local t = { id = id, round = r.round, items = {} }
+            local t = { id = id, round = r.round, build = r.build, items = {} }
             for _, it in ipairs(r.items) do t.items[#t.items + 1] = Item(it) end
             byId[id] = t
         end
@@ -203,10 +207,41 @@ end
 
 local function Done(id, text) return db and db.done[id] and db.done[id][text] == true end
 
+-- A failed item's note (may be ""), or nil when it hasn't failed.
+local function Failed(id, text) return db and db.fail[id] and db.fail[id][text] end
+
+local function Drop(t, id) if t[id] and not next(t[id]) then t[id] = nil end end
+
+-- Pass and fail exclude each other: setting one clears the other.
 local function SetDone(id, text, on)
     db.done[id] = db.done[id] or {}
     db.done[id][text] = on or nil
-    if not next(db.done[id]) then db.done[id] = nil end
+    Drop(db.done, id)
+    if on and db.fail[id] then db.fail[id][text] = nil; Drop(db.fail, id) end
+end
+
+-- note = nil clears the fail; a string (even "") marks it failed.
+local function SetFail(id, text, note)
+    if note == nil then
+        if db.fail[id] then db.fail[id][text] = nil; Drop(db.fail, id) end
+        return
+    end
+    db.fail[id] = db.fail[id] or {}
+    db.fail[id][text] = note
+    if db.done[id] then db.done[id][text] = nil; Drop(db.done, id) end
+end
+
+-- passed, failed counts for one round.
+local function Tally(r)
+    local p, f = 0, 0
+    for _, it in ipairs(r.items) do
+        if Done(r.id, it.text) then p = p + 1 elseif Failed(r.id, it.text) then f = f + 1 end
+    end
+    return p, f
+end
+
+local function CountText(p, n, f)
+    return ("%d/%d"):format(p, n) .. (f > 0 and ("  |cffe64d4d" .. f .. " failed|r") or "")
 end
 
 -- "|cffRRGGBB" for the current accent.
@@ -226,9 +261,10 @@ end
 function DC:Refresh() if frame and frame:IsShown() then Layout() end end
 
 -- Replace this id's round (this session). Ticks for items with the same text carry over.
-function DC:Register(id, round, items)
+-- build (optional, e.g. a short commit hash) is shown in the header and saved in the report.
+function DC:Register(id, round, items, build)
     CheckId(id, "Register")
-    DevChecklist_Rounds[id] = { round = round, items = type(items) == "table" and items or {} }
+    DevChecklist_Rounds[id] = { round = round, build = build, items = type(items) == "table" and items or {} }
     DC:Refresh()
 end
 
@@ -237,7 +273,7 @@ function DC:Add(id, area, text, send)
     CheckId(id, "Add")
     local r = DevChecklist_Rounds[id]
     if type(r) ~= "table" or type(r.items) ~= "table" then
-        r = { round = type(r) == "table" and r.round or nil, items = {} }
+        r = { round = type(r) == "table" and r.round or nil, build = type(r) == "table" and r.build or nil, items = {} }
         DevChecklist_Rounds[id] = r
     end
     r.items[#r.items + 1] = { area, text, send }
@@ -304,7 +340,7 @@ end
 function DC:Clear(id)
     CheckId(id, "Clear")
     DevChecklist_Rounds[id] = nil
-    if db then db.parked[id], db.done[id], db.collapsed[id], db.groups[id] = nil, nil, nil, nil end
+    if db then db.parked[id], db.done[id], db.fail[id], db.collapsed[id], db.groups[id] = nil, nil, nil, nil, nil end
     DC:Refresh()
 end
 
@@ -441,6 +477,20 @@ local function TaskForm(body, y, id)
     return 44
 end
 
+-- One-line note under a failed item. Enter saves, Esc closes (the fail stays).
+local function NoteForm(body, y, id, text)
+    local e = Field(body, W - 2 * PAD - 20, "What went wrong? Enter saves")
+    e:SetPoint("TOPLEFT", PAD + 20, y - 2)
+    e:SetText(Failed(id, text) or "")
+    e:SetScript("OnEnterPressed", function(self)
+        SetFail(id, text, Trim(self:GetText()))
+        editing = nil
+        Layout()
+    end)
+    e:SetFocus()
+    return 26
+end
+
 -- Paste box for a markdown list; Import adds it, Esc closes.
 -- ponytail: no scroll frame, so a long paste is clipped in the box (all of it
 -- still imports; the count below says how much). Add one if that bothers.
@@ -519,8 +569,7 @@ Layout = function()
 
     for _, r in ipairs(Rounds()) do
         any = true
-        local done = 0
-        for _, it in ipairs(r.items) do if Done(r.id, it.text) then done = done + 1 end end
+        local done, nfail = Tally(r)
         open = open + #r.items - done
         local adding = editing and editing.kind == "task" and editing.id == r.id
         local folded = not adding and #r.items > 0 and Folded(r, done)
@@ -539,13 +588,14 @@ Layout = function()
         end)
         local hc = Text(h, 11, NOTE)
         hc:SetPoint("RIGHT", plus, "LEFT", -4, 0)
-        hc:SetText(("%d/%d"):format(done, #r.items))
+        hc:SetText(CountText(done, #r.items, nfail))
         local ht = Text(h, 12)
         ht:SetPoint("LEFT", PAD, 0)
         ht:SetPoint("RIGHT", hc, "LEFT", -6, 0)
         ht:SetWordWrap(false)
         ht:SetText((folded and "+ " or "- ") .. accent .. r.id .. "|r"
-            .. ((r.round and r.round ~= "") and ("  " .. r.round) or ""))
+            .. ((r.round and r.round ~= "") and ("  " .. r.round) or "")
+            .. ((r.build and r.build ~= "") and ("  |cff9a9a9a" .. r.build .. "|r") or ""))
         h:SetScript("OnClick", function() db.collapsed[r.id] = not folded; Layout() end)
         if x then
             if armed[r.id] then
@@ -579,6 +629,7 @@ Layout = function()
             lastArea = it.area
 
             local row = CreateFrame("Button", nil, body)
+            row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             row:SetPoint("TOPLEFT", 0, y)
             Hover(row)
             local box = Box(row)
@@ -588,20 +639,34 @@ Layout = function()
             fs:SetWidth(W - 2 * PAD - 20 - (it.parked and 16 or 0))
             fs:SetWordWrap(true)
             local send = (type(it.send) == "string" and it.send ~= "") and ("  |cff9a9a9a" .. it.send .. "|r") or ""
-            fs:SetText(it.text .. send)
             local function Paint()
-                local on = Done(r.id, it.text)
-                box.fill:SetColorTexture(br, bg, bb, 0.8)
-                box.fill:SetShown(on)
-                fs:SetTextColor(on and MUTED[1] or 1, on and MUTED[2] or 1, on and MUTED[3] or 1)
+                local on, note = Done(r.id, it.text), Failed(r.id, it.text)
+                local c = note and FAIL or (on and MUTED) or { 1, 1, 1 }
+                box.fill:SetColorTexture(note and FAIL[1] or br, note and FAIL[2] or bg, note and FAIL[3] or bb, 0.8)
+                box.fill:SetShown(on or note ~= nil)
+                fs:SetTextColor(c[1], c[2], c[3])
+                fs:SetText(it.text .. send .. ((note and note ~= "") and ("  |cffe64d4d" .. note .. "|r") or ""))
             end
             Paint()
-            row:SetScript("OnClick", function()
+            -- Left click passes (again to clear); right click fails and asks for a note (again to clear).
+            row:SetScript("OnClick", function(_, button)
+                local wasFailed = Failed(r.id, it.text) ~= nil
+                if button == "RightButton" then
+                    if wasFailed then
+                        SetFail(r.id, it.text, nil)
+                        editing = nil
+                    else
+                        SetFail(r.id, it.text, "")
+                        editing = { kind = "note", id = r.id, text = it.text }
+                    end
+                    Layout()
+                    return
+                end
                 SetDone(r.id, it.text, not Done(r.id, it.text))
+                if wasFailed then Layout() return end
                 Paint()
-                local n = 0
-                for _, i2 in ipairs(r.items) do if Done(r.id, i2.text) then n = n + 1 end end
-                hc:SetText(("%d/%d"):format(n, #r.items))
+                local p, f = Tally(r)
+                hc:SetText(CountText(p, #r.items, f))
             end)
             if it.parked then
                 local del = XButton(row, 7, "Delete Task")
@@ -611,6 +676,11 @@ Layout = function()
             local rh = math.max(20, fs:GetStringHeight() + 8)
             row:SetSize(W, rh)
             y = y - rh
+            if editing and editing.kind == "note" and editing.id == r.id and editing.text == it.text then
+                formTop = -y
+                formH = NoteForm(body, y, r.id, it.text)
+                y = y - formH
+            end
         end
 
         if #r.items == 0 and not adding then
@@ -666,15 +736,38 @@ end
 
 -- Load --------------------------------------------------------------------
 
+-- Summary per round for whoever reads the results: written on reload and
+-- logout, which is also when the game saves DevChecklistDB.
+local function WriteReport()
+    if not db then return end
+    db.report = {}
+    for _, r in ipairs(Rounds()) do
+        if #r.items > 0 then
+            local pass, fails = 0, {}
+            for _, it in ipairs(r.items) do
+                if Done(r.id, it.text) then
+                    pass = pass + 1
+                elseif Failed(r.id, it.text) then
+                    fails[#fails + 1] = { text = it.text, note = Failed(r.id, it.text) }
+                end
+            end
+            db.report[r.id] = { round = r.round, build = r.build, pass = pass, open = #r.items - pass - #fails, fail = fails }
+        end
+    end
+end
+
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("ADDON_LOADED")
 ev:RegisterEvent("PLAYER_LOGIN")
+ev:RegisterEvent("PLAYER_LOGOUT")
 ev:SetScript("OnEvent", function(_, event, name)
+    if event == "PLAYER_LOGOUT" then WriteReport() return end
     if event == "ADDON_LOADED" then
         if name ~= ADDON then return end
         DevChecklistDB = DevChecklistDB or {}
         db = DevChecklistDB
         db.done = db.done or {}
+        db.fail = db.fail or {}
         db.collapsed = db.collapsed or {}
         db.parked = db.parked or {}
         db.groups = db.groups or {}

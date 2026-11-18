@@ -2,7 +2,7 @@
 
 An in-game checklist of what to test. A tester ticks tasks off as they play,
 and the ticks are saved, so whoever wrote the tasks can read the results
-afterwards. Any number of addons can use it at once without touching each
+afterwards (passes, fails and a short note for each fail). Any number of addons can use it at once without touching each
 other's lists.
 
 - [Using the checklist](#using-the-checklist)
@@ -13,9 +13,12 @@ other's lists.
 Type `/dc` to show or hide the window. It also opens by itself at login
 while anything is unticked.
 
-- **Tick a task:** click it. Click again to untick.
+- **Pass a task:** left click it. Click again to clear.
+- **Fail a task:** right click it, type a one-line note, press Enter (Esc keeps
+  the fail with no note). Right click again to clear. A pass and a fail
+  replace each other.
 - **Fold a group:** click its header. The header shows how many tasks are
-  done (`3/8`). A group folds by itself once everything in it is ticked.
+  passed (`3/8`, plus a red count of fails). A group folds by itself once everything in it is ticked.
 - **Move the window:** drag the title bar. It remembers where you left it.
 
 ### Add your own tasks
@@ -100,13 +103,15 @@ if DevChecklist then
         { "login", "No Lua errors on login.", "yes / no" },
         { "bags",  "Open your bags: a Sort button shows.", "screenshot" },
         { area = "bags", text = "Click Sort twice: nothing moves the second time." },
-    })
+    }, "a1b2c3d")
 end
 ```
 
 - The first argument is your **id**: one group in the window, and the key for
   your ticks. Use your addon's name. Ids are case-sensitive.
 - The second is the **round name**, shown next to the id.
+- The optional fourth is a **build** label (such as a short commit hash). It is
+  shown in grey in the header and saved in the report.
 - Each task is `{ area, text, send }` or `{ area =, text =, send = }`.
   `area` groups tasks under a small heading, `text` is the task, and `send`
   (optional) is shown in grey after it: what you want back.
@@ -139,6 +144,11 @@ Outside the game, after the tester reloads or logs out, ticks are in
 ```lua
 DevChecklistDB = {
     done = { ["MyAddon"] = { ["No Lua errors on login."] = true } },
+    fail = { ["MyAddon"] = { ["Open your bags: a Sort button shows."] = "button missing at 1080p" } },
+    report = { ["MyAddon"] = {            -- summary, rewritten on every reload and logout
+        round = "v1.2: bag sort", build = "a1b2c3d", pass = 1, open = 1,
+        fail = { { text = "Open your bags: a Sort button shows.", note = "button missing at 1080p" } },
+    } },
     parked = { ... }, groups = { ... },   -- tasks and groups added in game
 }
 ```
@@ -147,15 +157,15 @@ DevChecklistDB = {
 
 | Call | What it does | Saved? |
 |---|---|---|
-| `:Register(id, round, tasks)` | Set your round (replaces it) | Ticks only |
+| `:Register(id, round, tasks[, build])` | Set your round (replaces it) | Ticks and fails only |
 | `:Add(id, area, text[, send])` | Add one task to your round | Ticks only |
 | `:Park(id, area, text[, send])` | Add one task that stays until deleted | Yes |
 | `:Import(markdown[, id])` | Add tasks from a markdown list (format above); `id` is the group when there's no `#` line. Returns how many were added | Yes |
 | `:AddGroup(id)` | Add an empty group | Yes |
 | `:Unpark(id, index)` | Delete a saved task (`index` within that id's saved tasks) and its tick | Yes |
-| `:Clear(id)` | Delete everything for this id: round, saved tasks, ticks | Yes |
+| `:Clear(id)` | Delete everything for this id: round, saved tasks, passes and fails | Yes |
 | `:IsDone(id, text)` | Is this task ticked? | |
-| `:Progress(id)` | Returns `done, total` | |
+| `:Progress(id)` | Returns `passed, total` | |
 | `:Show()` / `:Hide()` / `:Toggle()` | The window | |
 | `:Refresh()` | Redraw the window if it's open | |
 
@@ -173,6 +183,7 @@ DevChecklist_Rounds["MyAddon"] = {
     items = {
         { "login", "No Lua errors on login.", "yes / no" },
     },
+    build = "a1b2c3d",   -- optional
 }
 ```
 

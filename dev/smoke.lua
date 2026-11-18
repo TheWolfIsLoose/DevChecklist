@@ -1,5 +1,5 @@
 -- Offline smoke test for DevChecklist with stubbed WoW API.
--- Run from the repo root: texlua dev/smoke.lua .   (must print SMOKE OK)
+-- Run from the repo root: luajit dev/smoke.lua .   (must print SMOKE OK; luajit is Lua 5.1, like the game)
 local dir = arg[1] or "."
 local handlers = {}
 local function Dummy()
@@ -156,5 +156,37 @@ go._OnClick(go)
 assert(db.parked.Window and db.parked.Window[1][2] == "From the box.", "window import")
 btns[3]._OnClick(btns[3]); paste = Newest(function(f) return f._type == "EditBox" and not f._OnTabPressed end)
 paste._OnEscapePressed(paste)
+-- pass / fail / note / build / report
+do
+  DC:Register("PF", "r1", { {"a", "Item A"}, {"a", "Item B"}, {"b", "Item C"} }, "abc1234")
+  assert(DevChecklist_Rounds.PF.build == "abc1234", "build kept")
+  local function Row(text)
+    for i = #KIDS, 1, -1 do local fs = KIDS[i]
+      if type(fs._text) == "string" and fs._text:find(text, 1, true) and fs._parent._type == "Button" and fs._parent._OnClick then return fs._parent end end
+  end
+  DC:Show()
+  Row("Item A")._OnClick(Row("Item A"), "LeftButton")
+  assert(db.done.PF["Item A"] and not db.fail.PF, "left click passes")
+  Row("Item B")._OnClick(Row("Item B"), "RightButton")
+  assert(db.fail.PF and db.fail.PF["Item B"] == "", "right click fails")
+  local note = Newest(function(f) return f._type == "EditBox" and f._OnEnterPressed and not f._OnTabPressed end)
+  note._text = "  bars overlap  "; note._OnEnterPressed(note)
+  assert(db.fail.PF["Item B"] == "bars overlap", "note saved, trimmed")
+  Row("Item B")._OnClick(Row("Item B"), "LeftButton")
+  assert(db.done.PF["Item B"] and not db.fail.PF, "pass clears the fail")
+  Row("Item B")._OnClick(Row("Item B"), "RightButton")
+  assert(db.fail.PF["Item B"] == "" and not db.done.PF["Item B"], "fail clears the pass")
+  Row("Item B")._OnClick(Row("Item B"), "RightButton")
+  assert(not db.fail.PF, "right click again clears the fail")
+  Row("Item C")._OnClick(Row("Item C"), "RightButton")
+  note = Newest(function(f) return f._type == "EditBox" and f._OnEnterPressed and not f._OnTabPressed end)
+  note._text = "wrong sound"; note._OnEnterPressed(note)
+  handlers[1](nil, "PLAYER_LOGOUT")
+  local rep = db.report.PF
+  assert(rep.round == "r1" and rep.build == "abc1234" and rep.pass == 1 and rep.open == 1 and #rep.fail == 1, "report counts")
+  assert(rep.fail[1].text == "Item C" and rep.fail[1].note == "wrong sound", "report fail entry")
+  assert(select(1, DC:Progress("PF")) == 1, "fails are not passes")
+  DC:Clear("PF"); assert(not db.fail.PF, "clear drops fails")
+end
 print = io.write
 io.write("SMOKE OK\n")
