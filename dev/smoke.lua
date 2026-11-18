@@ -216,6 +216,11 @@ do
   Row("Item A")._OnClick(Row("Item A"), "LeftButton")
   assert(not db.snap.PF["Item A"] and db.done.PF["Item A"], "pass drops the snapshot")
   assert(db.snap.PF["Item C"], "Item C kept its snapshot")
+  zone = ""; local inst = { "Murder Row", "scenario", 0, "" }
+  local oldInfo = GetInstanceInfo; GetInstanceInfo = function() return unpack(inst) end
+  recEv(nil, "PLAYER_ENTERING_WORLD", true, false)
+  assert(db.log[#db.log]:find("login: Murder Row (Murder Row, scenario)", 1, true), "empty zone and difficulty filled: " .. db.log[#db.log])
+  GetInstanceInfo, zone = oldInfo, "Dornogal"
   handlers[1](nil, "PLAYER_LOGOUT")
   local rep = db.report.PF
   assert(rep.round == "r1" and rep.build == "abc1234" and rep.pass == 1 and rep.open == 1 and #rep.fail == 1, "report counts")

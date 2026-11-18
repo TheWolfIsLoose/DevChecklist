@@ -229,10 +229,13 @@ local function AddLog(msg)
     while #log > LOG_MAX do table.remove(log, 1) end
 end
 
+local function Nz(s) if s ~= "" then return s end end    -- "" to nil (the game returns "" for some fields)
+
+-- "zone" or "zone (instance, difficulty)". The zone can be "" at first login.
 local function ZoneLine()
     local name, kind, _, diff = GetInstanceInfo()
-    local zone = GetRealZoneText() or ""
-    if kind and kind ~= "none" then return zone .. " (" .. (name or "?") .. ", " .. (diff or kind) .. ")" end
+    local zone = Nz(GetRealZoneText()) or Nz(name) or "?"
+    if kind and kind ~= "none" then return zone .. " (" .. (Nz(name) or "?") .. ", " .. (Nz(diff) or kind) .. ")" end
     return zone
 end
 
@@ -292,7 +295,7 @@ local function Snapshot(id)
     local s = {
         at = date("%Y-%m-%d %H:%M:%S"),
         zone = ZoneLine(),
-        instance = (kind and kind ~= "none") and ((name or "?") .. " (" .. (diff or kind) .. ")") or "none",
+        instance = (kind and kind ~= "none") and ((Nz(name) or "?") .. " (" .. (Nz(diff) or kind) .. ")") or "none",
         combat = InCombatLockdown() and "yes" or "no",
         spec = spec or "none",
         group = GetNumGroupMembers(),
