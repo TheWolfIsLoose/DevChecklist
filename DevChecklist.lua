@@ -455,7 +455,15 @@ end
 function DC:Clear(id)
     CheckId(id, "Clear")
     DevChecklist_Rounds[id] = nil
-    if db then db.parked[id], db.done[id], db.fail[id], db.snap[id], db.collapsed[id], db.groups[id] = nil, nil, nil, nil, nil, nil end
+    if db then
+        db.parked[id], db.done[id], db.fail[id], db.snap[id], db.collapsed[id], db.groups[id] = nil, nil, nil, nil, nil, nil
+        -- Its log lines too ("[id] ..."), so a cleared round leaves no trail.
+        local tag, keep = "[" .. id .. "]", {}
+        for _, line in ipairs(db.log or {}) do
+            if not line:find(tag, 1, true) then keep[#keep + 1] = line end
+        end
+        if db.log then db.log = keep end
+    end
     DC:Refresh()
 end
 
