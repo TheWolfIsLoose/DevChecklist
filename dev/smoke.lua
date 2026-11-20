@@ -235,6 +235,23 @@ do
   DC:Register("Again", "r2", { {"a", "One"} })
   DC:Log("Again", "back on")
   assert(db.log[#db.log]:find("back on", 1, true), "recording resumes with a new round")
+  -- /dc note: lands on the open round, stamped; General when none is open
+  SlashCmdList.DEVCHECKLIST("note   bars flicker at the bank ")
+  local nt = db.notes.Again and db.notes.Again[1]
+  assert(nt and nt.text == "bars flicker at the bank" and nt.zone == "Dornogal" and nt.at and nt.spec == "Fire" and not nt.log, "note on the open round")
+  assert(printed[#printed]:find("note saved to Again.", 1, true), "note confirm line")
+  DC:Register("Second", "r3", { {"a", "S1"} })
+  DC:Add("Second", "a", "S2")
+  Row("S2")._OnClick(Row("S2"), "LeftButton")   -- last ticked: Second is where a note goes
+  SlashCmdList.DEVCHECKLIST("note second round")
+  assert(db.notes.Second and db.notes.Second[1].text == "second round" and #db.notes.Again == 1, "note follows the round last ticked")
+  SlashCmdList.DEVCHECKLIST("note")
+  assert(#db.notes.Again == 1 and #db.notes.Second == 1, "empty note ignored")
+  DC:Clear("Again"); assert(not db.notes.Again, "clear drops notes")
+  for id in pairs(DevChecklist_Rounds) do DC:Clear(id) end
+  SlashCmdList.DEVCHECKLIST("note nothing open")
+  assert(db.notes.General and db.notes.General[1].text == "nothing open", "General when no round is open")
+  assert(printed[#printed]:find("General (no round open)", 1, true), "general confirm line")
 end
 print = io.write
 io.write("SMOKE OK\n")

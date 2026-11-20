@@ -71,6 +71,7 @@ Round 3: new bag sort. Lines like this one are notes and are skipped.
 |---|---|
 | `/dc` | Show or hide the window |
 | `/dc add [area:] task` | Add a task to the "Parked" group |
+| `/dc note text` | Save a quick observation (time, zone, combat, spec, group, build) on the open round. With no round open it goes to a "General" list and says so |
 | `/dc clear <group>` | Delete a group, its tasks and its ticks |
 
 ## For addon authors
@@ -154,6 +155,8 @@ DevChecklistDB = {
         spec = "Fire", group = 0, build = "a1b2c3d",
         log = { "21:02:40 reload: Dornogal", "21:03:55 [MyAddon] bags opened" },   -- last 20 log lines
     } } },
+    notes = { ["MyAddon"] = { { at = "2026-11-17 21:05:30", zone = "Dornogal", combat = "no",
+        spec = "Fire", group = 0, build = "a1b2c3d", text = "bars flicker at the bank" } } },   -- from /dc note
     log = { "21:02:40 reload: Dornogal", "21:03:10 combat in", ... },   -- flight recorder, last 100 lines
     parked = { ... }, groups = { ... },   -- tasks and groups added in game
 }

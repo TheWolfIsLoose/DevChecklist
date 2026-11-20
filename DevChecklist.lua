@@ -25,6 +25,7 @@ local NOTE = { 0.604, 0.604, 0.604 }   -- note grey #9A9A9A
 local MUTED = { 0.5, 0.5, 0.5 }        -- muted text
 local FAIL = { 0.9, 0.3, 0.3 }         -- failed item
 local db, frame, Layout
+local lastId                           -- round id last ticked or failed (where /dc note goes if several are open)
 local editing                          -- open inline form: { kind = "group" } or { kind = "task", id =, area = }
 local armed = {}                       -- group id -> time its delete was armed
 local pending = {}                     -- Park / AddGroup / Import calls made before our saved data loaded
@@ -310,6 +311,7 @@ end
 
 -- Pass and fail exclude each other: setting one clears the other.
 local function SetDone(id, text, on)
+    lastId = id
     db.done[id] = db.done[id] or {}
     db.done[id][text] = on or nil
     Drop(db.done, id)
@@ -321,6 +323,7 @@ end
 -- note = nil clears the fail; a string (even "") marks it failed. The first
 -- fail takes a snapshot; adding the note later keeps it.
 local function SetFail(id, text, note)
+    lastId = id
     if note == nil then
         if db.fail[id] then db.fail[id][text] = nil; Drop(db.fail, id) end
         DropSnap(id, text)
@@ -334,6 +337,42 @@ local function SetFail(id, text, note)
     db.fail[id][text] = note
     if db.done[id] then db.done[id][text] = nil; Drop(db.done, id) end
     Arm()
+end
+
+-- Quick notes -------------------------------------------------------------
+-- /dc note <text> saves one stamped line (time, zone, combat, spec, group,
+-- build) in DevChecklistDB.notes[id], on the open round's report. Nothing runs
+-- until the command is typed.
+
+-- The round a note belongs to: one with a task not yet passed (the one last
+-- ticked or failed when several are open), or nil.
+local function OpenRound()
+    local first
+    for id, r in pairs(DevChecklist_Rounds) do
+        if type(r) == "table" and type(r.items) == "table" then
+            for _, it in ipairs(r.items) do
+                local text = type(it) == "table" and (it.text or it[2])
+                if type(text) == "string" and text ~= "" and not Done(id, text) then
+                    if id == lastId then return id end
+                    if not first or id < first then first = id end
+                    break
+                end
+            end
+        end
+    end
+    return first
+end
+
+-- No round open: the note goes to the "General" list. Returns the id it landed on.
+function DC:Note(text)
+    text = Trim(text)
+    if text == "" or not db then return end
+    local id = OpenRound()
+    local s = Snapshot(id or "General")
+    s.log, s.text = nil, text:sub(1, 250)
+    db.notes[id or "General"] = db.notes[id or "General"] or {}
+    table.insert(db.notes[id or "General"], s)
+    return id or "General", id == nil
 end
 
 -- passed, failed counts for one round.
@@ -457,6 +496,7 @@ function DC:Clear(id)
     DevChecklist_Rounds[id] = nil
     if db then
         db.parked[id], db.done[id], db.fail[id], db.snap[id], db.collapsed[id], db.groups[id] = nil, nil, nil, nil, nil, nil
+        db.notes[id] = nil
         -- Its log lines too ("[id] ..."), so a cleared round leaves no trail.
         local tag, keep = "[" .. id .. "]", {}
         for _, line in ipairs(db.log or {}) do
@@ -898,6 +938,7 @@ ev:SetScript("OnEvent", function(_, event, name)
         db.groups = db.groups or {}
         db.log = db.log or {}
         db.snap = db.snap or {}
+        db.notes = db.notes or {}
         for _, fn in ipairs(pending) do fn() end
         pending = nil
         return
@@ -935,7 +976,12 @@ SlashCmdList.DEVCHECKLIST = function(msg)
     elseif cmd == "clear" and rest ~= "" then
         DC:Clear(rest)
         Print(rest .. " cleared.")
+    elseif cmd == "note" and rest ~= "" then
+        local id, general = DC:Note(rest)
+        if id then
+            Print(general and "note saved to General (no round open)." or ("note saved to " .. id .. "."))
+        end
     else
-        Print("|cffffffff/dc|r show or hide  |cffffffff/dc add [area:] text|r park an item  |cffffffff/dc clear <round>|r drop a round and its ticks")
+        Print("|cffffffff/dc|r show or hide  |cffffffff/dc add [area:] text|r park an item  |cffffffff/dc note text|r note for the open round  |cffffffff/dc clear <round>|r drop a round and its ticks")
     end
 end
