@@ -46,7 +46,7 @@ Row 3: bag search filters
 | # | Repo | Branch/PR | What | Size | Brief | Blocked by | State |
 
 ## Inbox
-2026-01-05 | idea | tooltip shows item level | community chat
+2026-01-05 | idea | tooltip shows item level | tester report
 ```
 
 - **One Focus item.** Only one row is in progress.
@@ -58,17 +58,73 @@ Row 3: bag search filters
 
 ## In-game test rounds with DevChecklist
 
-The build step writes the test round as a DevChecklist round file
-(`Rounds/<id>.lua`, see the README) and installs the build. You `/reload`,
-tick or fail each item in game, and `/reload` again. The agent then reads the
-results from the SavedVariables file instead of asking you to paste them.
+The build step writes the test round as a DevChecklist round file (see
+"Round files" in the README) and installs the build. You `/reload`, tick or
+fail each item in game (a fail takes a one-line note), and `/reload` again.
+The agent then reads the results from the SavedVariables file instead of
+asking you to paste them.
 
-- At most 5 short items per round, one round per area.
-- Group content (dungeons, raids) is never on the checklist; it is tested by
-  playing.
+### The loop, step by step
+
+1. **Build and check.** The agent branches off the target branch, builds,
+   adds the changelog line and runs the project's checks.
+2. **Install.** It copies the build into the game's AddOns folder and verifies
+   the copy byte for byte against what it staged. Files it can't safely remove
+   (stale leftovers) it lists for you instead of deleting.
+3. **Publish the round.** One small script (have the agent write it) turns a
+   markdown task list into a round file and keeps exactly one round file in
+   the DevChecklist `.toc`, for example `Rounds\Active.lua`, built from one
+   file per open round. A script also lets you run two rounds at once and
+   close one later without leaving files behind.
+4. **Test.** `/reload` (a reload picks up new files, `.toc` changes and Lua
+   edits; no client restart), then `/dc`, play, tick or fail, `/reload` again.
+   SavedVariables are written only on reload or logout, so the agent sees
+   nothing until you do.
+5. **Read the results.** The agent reads all of these, pass or fail, and
+   reports each in one line even when clean:
+   - ticks, fails with their notes, and any unticked items;
+   - the flight recorder: the snapshot saved with each fail (time, zone,
+     combat, spec, group size, build label, last log lines) and the
+     `DevChecklist:Log` lines for the round;
+   - errors from BugGrabber/BugSack (`!BugGrabber.lua` in SavedVariables).
+     An error from a session older than the round's reload is stale; say so
+     rather than chasing it.
+6. **Close the round, pass or fail.** Remove its file and regenerate the
+   joined file so the in-game list shows only open rounds. A follow-up round
+   gets a new id.
+7. **Next.** Fails and notes feed the next round (cap: 3). A pass sets the row
+   to "round passed" and waits for your go before the ship step.
+
+### Round rules
+
+- At most 5 short items per round, one round per area. Each item is an action
+  plus the expected result, with what to send back (yes/no, screenshot).
+- Group content (dungeons, raids, bosses) is never on the checklist; it is
+  tested by playing. Have the addon log by itself and read the log afterwards.
 - While a round is open, temporary `DevChecklist:Log(id, text)` lines at the
-  feature's decision points give a trail when an item fails. Remove them
-  before the PR.
+  feature's decision points (guarded by `if DevChecklist`) give a trail when an
+  item fails. Remove them before the PR.
+- If you suspect the change caused a new problem, back it out first, then
+  investigate.
+
+### Traps
+
+- **SavedVariables lag.** Nothing is written until `/reload` or logout. Ask
+  for the reload before reading.
+- **Windows line endings.** SavedVariables use CRLF and tab indents. Strip `\r`
+  and leading whitespace before grepping, or let a small digest script do it.
+- **Editing Lua byte for byte.** Some shell tools (`sed -i`, scripting
+  languages with escape handling) rewrite line endings or mangle `\r\n`. Edit
+  files with the agent's edit tool, run the project's checks, then commit in
+  one chain.
+- **Stale ticks.** Ticks follow the task text. Results for items no longer in
+  the current round file are old; ignore them.
+- **One round file in the `.toc`.** Don't add a `.toc` line per round;
+  closed rounds would leave stale lines and files behind.
+- **Rare bugs.** Don't ask the tester to reproduce one on purpose. Log, play
+  normally, read the log later.
+- **Verify the install.** An agent that says "installed" has not shown it;
+  compare the staged files with the installed ones.
 
 ## Template skills
 
@@ -107,8 +163,11 @@ description: Use for a feature row before building. Max 8 questions, then a brie
 name: addon-fix
 description: Use when something is broken and the cause is unknown. Max 2 probe rounds, ends in a fix brief. Never builds the fix.
 ---
-1. Read the error and round results from saved files; never ask for pastes.
-2. Probe: add logging or a read-only check, install, read the result. Max 2 rounds.
+1. Read the error and round results from saved files (SavedVariables: the
+   checklist's fails, notes and snapshots, plus BugGrabber errors); never ask
+   for pastes. Ignore errors from sessions older than the last reload.
+2. Probe: add logging or a read-only check, install, read the result, close
+   the round. Max 2 rounds. Suspect a recent change? Back it out first.
 3. Grep every caller before naming a fix location; fix at the shared point.
 4. Write the brief: root cause and evidence, fix location, one test item.
 5. No cause after 2 rounds: say what the logging now catches, set State to
@@ -124,10 +183,14 @@ description: Use to build one briefed row or known bug. Branch, checks, install,
 2. Branch off the latest target branch. Read the code end to end first.
 3. Build in the project's style, add its changelog line, run its checks.
 4. Self-review against the maintainer's usual review notes before installing.
-5. Install the build and write one DevChecklist round (5 items max).
-6. When the tester says done, read results from SavedVariables.
-7. Fails feed the next round. After 3 failed rounds, write a handoff and send
-   the row back to plan or fix. Pass: set State to `round passed`. Stop.
+5. Install the build (verify the copy) and publish one DevChecklist round
+   (5 items max, temporary `DevChecklist:Log` lines at decision points).
+6. When the tester says done, read results from SavedVariables: ticks, fails
+   and notes, flight recorder snapshots and log lines, BugGrabber errors.
+   Report each source in one line, even when clean. Then close the round.
+7. Fails feed the next round (new id). After 3 failed rounds, write a handoff
+   and send the row back to plan or fix. Pass: set State to `round passed`.
+   Stop. Never open a PR here.
 ```
 
 ```markdown
@@ -135,8 +198,9 @@ description: Use to build one briefed row or known bug. Branch, checks, install,
 name: addon-ship
 description: Use when a round has passed and you say go. Review by size, open one PR, update the queue.
 ---
-1. Confirm the round passed and you said go.
+1. Confirm the round passed (re-read the results) and you said go.
 2. Update the branch the way the project asks (merge or rebase), run checks.
+   Confirm no leftover `DevChecklist:Log` lines are in the diff.
 3. Review by size: S = the usual-notes list; M = plus a full diff read;
    L = a full code review.
 4. Open one PR with the project's title format and template. Drop temporary
