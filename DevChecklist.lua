@@ -912,6 +912,29 @@ ev:SetScript("OnEvent", function(_, event, name)
         end
         db.v = 2
     end
+    -- A round closed from outside (its file removed) leaves its ticks, fails,
+    -- snapshots and log lines behind; every id still in use is in Rounds()
+    -- (loaded rounds, parked items, own lists), so anything else is stale.
+    -- Closing happens after the results are read, so nothing wanted goes.
+    do
+        local live = {}
+        for _, r in ipairs(Rounds()) do live[r.id] = true end
+        local stale = {}
+        for _, t in ipairs({ db.done, db.fail, db.snap, db.collapsed }) do
+            for id in pairs(t) do if not live[id] then stale[id] = true end end
+        end
+        if next(stale) then
+            for id in pairs(stale) do
+                db.done[id], db.fail[id], db.snap[id], db.collapsed[id] = nil, nil, nil, nil
+            end
+            local keep = {}
+            for _, line in ipairs(db.log) do
+                local tagged = line:match("%[([^%]]+)%]")
+                if not (tagged and stale[tagged]) then keep[#keep + 1] = line end
+            end
+            db.log = keep
+        end
+    end
     Arm()
     for _, r in ipairs(Rounds()) do
         for _, it in ipairs(r.items) do
