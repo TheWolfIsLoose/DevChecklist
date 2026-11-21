@@ -237,11 +237,11 @@ do
   assert(db.log[#db.log]:find("back on", 1, true), "recording resumes with a new round")
   -- a round closed from outside leaves its saved ticks behind; the next login drops them, not live ones
   db.done.OLD, db.fail.OLD, db.snap.OLD, db.collapsed.OLD = { ["x"] = true }, { ["y"] = "n" }, { ["y"] = {} }, { x = true }
-  db.done.Again = { ["One"] = true }
+  db.collapsed.Again = false
   db.log[#db.log + 1] = "09:00:00 [OLD] stale line"; db.log[#db.log + 1] = "09:00:01 [Again] live line"; db.log[#db.log + 1] = "09:00:02 zone: Dornogal"
   handlers[1](nil, "PLAYER_LOGIN")
   assert(not (db.done.OLD or db.fail.OLD or db.snap.OLD or db.collapsed.OLD), "closed round's saved data dropped")
-  assert(db.done.Again and db.done.Again["One"], "live round's tick kept")
+  assert(db.collapsed.Again == false, "live round's saved state kept")
   local joined = table.concat(db.log, "\n")
   assert(not joined:find("[OLD]", 1, true) and joined:find("[Again] live line", 1, true) and joined:find("zone: Dornogal", 1, true), "only the stale round's log lines dropped")
   -- /dc note: lands on the open round, stamped; General when none is open
