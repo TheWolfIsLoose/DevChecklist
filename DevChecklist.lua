@@ -6,7 +6,8 @@
     saved), round files in Rounds/, or the window (+, Import, /dc add). One
     id never touches another id's tasks or ticks. Passes are saved in
     DevChecklistDB.done[id][task text], fails (with a one-line note) in
-    DevChecklistDB.fail[id][task text], and a per-round summary is written to
+    DevChecklistDB.fail[id][task text], /dc note lines in
+    DevChecklistDB.notes[id], and a per-round summary is written to
     DevChecklistDB.report on reload and logout. README.md has the full guide
     and API.
 
@@ -206,7 +207,10 @@ local function Rounds()
     return out
 end
 
-local function Done(id, text) return db and db.done[id] and db.done[id][text] == true end
+local function Done(id, text)
+    local t = db and db.done[id]
+    return type(t) == "table" and t[text] == true    -- not a table: v1 data before its move at login
+end
 
 -- A failed item's note (may be ""), or nil when it hasn't failed.
 local function Failed(id, text) return db and db.fail[id] and db.fail[id][text] end
@@ -216,11 +220,12 @@ local function Drop(t, id) if t[id] and not next(t[id]) then t[id] = nil end end
 -- Flight recorder ---------------------------------------------------------
 -- While a code or file round has an unpassed task, a few events (login and
 -- reload, zone change, combat in/out, Lua errors when BugGrabber is loaded)
--- and DevChecklist:Log lines go into DevChecklistDB.log (last LOG_MAX lines).
--- Each fail saves a snapshot of where the tester was in DevChecklistDB.snap.
--- No round open: no events registered, nothing recorded.
+-- and DevChecklist:Log lines go into DevChecklistDB.log (last LOG_MAX lines,
+-- each cut to LINE_MAX characters). Each fail saves a snapshot of where the
+-- tester was in DevChecklistDB.snap. No round open: no events registered,
+-- nothing recorded.
 
-local LOG_MAX, SNAP_LINES = 100, 20
+local LOG_MAX, SNAP_LINES, LINE_MAX, NOTE_MAX = 100, 20, 300, 50
 local rec                              -- event frame, made the first time a round opens
 local recording = false
 
@@ -240,7 +245,12 @@ local function ZoneLine()
     return zone
 end
 
+-- BugGrabber hands over the error itself (older versions) or its id (newer ones).
 local function OnBug(_, err)
+    if type(err) == "string" and BugGrabber and BugGrabber.GetErrorByID then
+        local ok, e = pcall(BugGrabber.GetErrorByID, BugGrabber, err)
+        if ok and e then err = e end
+    end
     local m = type(err) == "table" and err.message or err
     AddLog("error: " .. tostring(m):gsub("[\r\n]+", " "):sub(1, 160))
 end
@@ -267,10 +277,18 @@ local function SetRecording(on)
         rec:RegisterEvent("ZONE_CHANGED_NEW_AREA")
         rec:RegisterEvent("PLAYER_REGEN_DISABLED")
         rec:RegisterEvent("PLAYER_REGEN_ENABLED")
-        if BG and BG.RegisterCallback then BG.RegisterCallback(rec, "BugGrabber_BugGrabbed", OnBug) end
+        if BG and BG.RegisterCallback then
+            BG.RegisterCallback(rec, "BugGrabber_BugGrabbed", OnBug)
+        elseif BG and EventRegistry then
+            EventRegistry:RegisterCallback("BugGrabber.BugGrabbed", OnBug, rec)
+        end
     else
         rec:UnregisterAllEvents()
-        if BG and BG.UnregisterCallback then BG.UnregisterCallback(rec, "BugGrabber_BugGrabbed") end
+        if BG and BG.UnregisterCallback then
+            BG.UnregisterCallback(rec, "BugGrabber_BugGrabbed")
+        elseif BG and EventRegistry then
+            EventRegistry:UnregisterCallback("BugGrabber.BugGrabbed", rec)
+        end
     end
 end
 
@@ -370,8 +388,10 @@ function DC:Note(text)
     local id = OpenRound()
     local s = Snapshot(id or "General")
     s.log, s.text = nil, text:sub(1, 250)
-    db.notes[id or "General"] = db.notes[id or "General"] or {}
-    table.insert(db.notes[id or "General"], s)
+    local list = db.notes[id or "General"] or {}
+    db.notes[id or "General"] = list
+    list[#list + 1] = s
+    while #list > NOTE_MAX do table.remove(list, 1) end
     return id or "General", id == nil
 end
 
@@ -407,11 +427,14 @@ function DC:Refresh()
     if frame and frame:IsShown() then Layout() end
 end
 
--- One line in the flight recorder, e.g. DevChecklist:Log("MyAddon", "bags opened").
--- Kept only while a round is open; otherwise does nothing.
-function DC:Log(id, msg)
+-- One line in the flight recorder, e.g. DevChecklist:Log("MyAddon", "bags opened", 3).
+-- Values after the id are joined with spaces. Kept only while a round is
+-- open; otherwise does nothing.
+function DC:Log(id, ...)
     if not recording then return end
-    AddLog("[" .. tostring(id) .. "] " .. tostring(msg))
+    local parts = {}
+    for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+    AddLog("[" .. tostring(id) .. "] " .. table.concat(parts, " "):gsub("[\r\n]+", " "):sub(1, LINE_MAX))
 end
 
 -- Replace this id's round (this session). Ticks for items with the same text carry over.
@@ -941,6 +964,8 @@ ev:SetScript("OnEvent", function(_, event, name)
         db.notes = db.notes or {}
         for _, fn in ipairs(pending) do fn() end
         pending = nil
+        ev:UnregisterEvent("ADDON_LOADED")
+        Arm()   -- round files are loaded by now: record Log lines other addons send while they load
         return
     end
     -- v1 saved ticks flat by item text; v2 keys them by id. Move the ones that
@@ -970,10 +995,14 @@ ev:SetScript("OnEvent", function(_, event, name)
             end
             local keep = {}
             for _, line in ipairs(db.log) do
-                local tagged = line:match("%[([^%]]+)%]")
+                local tagged = line:match("^%S+ %[([^%]]+)%]")
                 if not (tagged and stale[tagged]) then keep[#keep + 1] = line end
             end
             db.log = keep
+        end
+        -- Notes of a closed round go the same way ("General" has no round and stays).
+        for id in pairs(db.notes) do
+            if not live[id] and id ~= "General" then db.notes[id] = nil end
         end
     end
     Arm()

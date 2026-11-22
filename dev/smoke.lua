@@ -1,5 +1,7 @@
 -- Offline smoke test for DevChecklist with stubbed WoW API.
 -- Run from the repo root: luajit dev/smoke.lua .   (must print SMOKE OK; luajit is Lua 5.1, like the game)
+-- With a saved file as the second argument (luajit dev/smoke.lua . path/to/SavedVariables/DevChecklist.lua)
+-- it only checks that the file loads, logs in and logs out cleanly, and prints SAVED DATA OK. The file is not changed.
 local dir = arg[1] or "."
 local handlers = {}
 local function Dummy()
@@ -43,6 +45,13 @@ InCombatLockdown = function() return inCombat end
 GetSpecialization = function() return 2 end
 GetSpecializationInfo = function(i) return 63, "Fire" end
 GetNumGroupMembers = function() return 0 end
+-- an error catcher that announces errors by id through the game's event registry
+local bugCb
+EventRegistry = {
+  RegisterCallback = function(_, name, fn, owner) if name == "BugGrabber.BugGrabbed" then bugCb = function(id) fn(owner, id) end end end,
+  UnregisterCallback = function(_, name) if name == "BugGrabber.BugGrabbed" then bugCb = nil end end,
+}
+BugGrabber = { GetErrorByID = function(_, id) return id == "table: 1" and { message = "boom in\nFile.lua:1" } or nil end }
 local printed = {}
 print = function(s) printed[#printed+1] = s end
 
@@ -50,6 +59,23 @@ assert(loadfile(dir.."/DevChecklist.lua"))("DevChecklist")
 -- a round file, as one would sit in Rounds/
 DevChecklist_Rounds.Demo = { round = "r1", items = { { "login", "No Lua errors.", "yes / no" }, { "bags", "Bag opens.", "screenshot" } } }
 local DC = DevChecklist
+if arg[2] then
+  dofile(arg[2])
+  assert(type(DevChecklistDB) == "table", "the file sets DevChecklistDB")
+  handlers[1](nil, "ADDON_LOADED", "DevChecklist")
+  handlers[1](nil, "PLAYER_LOGIN")
+  DC:Show()
+  DC:Log("Demo", "after login")
+  handlers[1](nil, "PLAYER_LOGOUT")
+  local sv = DevChecklistDB
+  for _, k in ipairs({ "done", "fail", "snap", "notes", "log", "parked", "groups", "collapsed", "report" }) do
+    assert(type(sv[k]) == "table", "DevChecklistDB." .. k .. " is a table")
+  end
+  assert(sv.v == 2 and #sv.log <= 100 and sv.log[#sv.log]:find("[Demo] after login", 1, true), "version, log cap, recording")
+  assert(sv.report.Demo and sv.report.Demo.open == 2, "report written for the loaded round")
+  io.write("SAVED DATA OK\n")
+  return
+end
 -- before saved data: Park queues
 DC:Park("Early", "a", "Queued item")
 DC:AddGroup("EarlyGroup")
@@ -59,6 +85,8 @@ DevChecklistDB = { done = { ["No Lua errors."] = true, ["Not a current item"] = 
 local fire = handlers[1]
 fire(nil, "ADDON_LOADED", "Other")
 fire(nil, "ADDON_LOADED", "DevChecklist")
+DC:Log("Demo", "sent while loading")
+assert(DevChecklistDB.log[1]:find("[Demo] sent while loading", 1, true), "Log is kept before login when a round file is loaded")
 fire(nil, "PLAYER_LOGIN")
 local db = DevChecklistDB
 assert(db.v == 2, "migrated")
@@ -261,6 +289,24 @@ do
   SlashCmdList.DEVCHECKLIST("note nothing open")
   assert(db.notes.General and db.notes.General[1].text == "nothing open", "General when no round is open")
   assert(printed[#printed]:find("General (no round open)", 1, true), "general confirm line")
+  -- Log joins the values after the id, drops line breaks and cuts long lines
+  DC:Register("L", "r", { {"a", "One"} })
+  DC:Log("L", "count", 3, nil, true)
+  assert(db.log[#db.log]:find("[L] count 3 nil true", 1, true), "log joins values: " .. db.log[#db.log])
+  DC:Log("L", ("x"):rep(400) .. "\nnext")
+  assert(#db.log[#db.log] == 9 + 4 + 300 and not db.log[#db.log]:find("\n"), "long log line cut to 300")
+  -- notes: last 50 per round; login drops a closed round's notes, never General
+  for i = 1, 60 do SlashCmdList.DEVCHECKLIST("note n" .. i) end
+  assert(#db.notes.L == 50 and db.notes.L[50].text == "n60", "notes capped at 50")
+  db.notes.Gone = { { text = "old" } }
+  handlers[1](nil, "PLAYER_LOGIN")
+  assert(not db.notes.Gone and db.notes.L and db.notes.General, "login drops only a closed round's notes")
+  -- Lua errors land in the log while a round is open; the listener goes when the last round closes
+  assert(bugCb, "error listener registered while recording")
+  bugCb("table: 1")
+  assert(db.log[#db.log]:find("error: boom in File.lua:1", 1, true), "error logged: " .. db.log[#db.log])
+  for id in pairs(DevChecklist_Rounds) do DC:Clear(id) end
+  assert(not bugCb, "error listener removed when no round is open")
 end
 print = io.write
 io.write("SMOKE OK\n")
