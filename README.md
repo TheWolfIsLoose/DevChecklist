@@ -7,6 +7,7 @@ other's lists.
 
 - [Using the checklist](#using-the-checklist)
 - [For addon authors](#for-addon-authors)
+- [The test loop, start to finish](docs/workflow.md)
 
 ## Using the checklist
 
@@ -94,7 +95,10 @@ end
 ```
 
 Every call can be made at any time, including at file load, before Dev
-Checklist's saved data is ready.
+Checklist's saved data is ready. One thing to know: call `Register` while
+your addon loads (at file load or on `ADDON_LOADED`), not later. At login,
+saved ticks, fails and notes of ids that have no round or saved tasks are
+treated as left over from a closed round and dropped.
 
 ### 2. Give the tester a round of tasks
 
@@ -162,18 +166,50 @@ DevChecklistDB = {
 }
 ```
 
+The file is plain Lua, so a script can load it instead of searching the
+text. `tools/results.lua` in this repo prints one round (passes, fails with
+their notes and snapshots, quick notes, and the round's log lines):
+
+```
+luajit tools/results.lua "<path>/SavedVariables/DevChecklist.lua" MyAddon
+```
+
+The game writes the file only on `/reload` and logout, so reload before
+reading. `report` is rewritten at the same moment and lists only rounds that
+were loaded then. Passes and fails are keyed by task text; results for a
+task that is no longer in the round are old.
+
 ### 5. Flight recorder
 
 While a round from `Register`, `Add` or a round file has a task not yet
 passed, Dev Checklist keeps a short log: login and reload, zone changes,
 combat in and out, and Lua errors when BugGrabber is loaded. Add your own
-lines with `DevChecklist:Log("MyAddon", "bags opened")`. Only the last 100
-lines are kept.
+lines from any addon:
+
+```lua
+if DevChecklist then DevChecklist:Log("MyAddon", "bags opened", count) end
+```
+
+The first argument is the round id; it becomes the line's `[MyAddon]` tag.
+Everything after it is turned into text and joined with spaces. Each line
+gets the time (`21:03:55 [MyAddon] bags opened 4`), is cut to 300
+characters, and only the last 100 lines are kept, shared by all rounds, so
+log at decision points, not every frame. The call is safe in combat and
+does nothing when no round is open.
 
 When the tester fails a task, a snapshot is saved with it in `snap`: time,
 zone (with instance and difficulty), combat, spec, group size, your build
 label and the last 20 log lines. Passing or clearing the task drops it. With
 no round open, nothing is recorded and no events are watched.
+
+`/dc note` saves the same stamp (without the log lines) plus the typed text
+in `notes`, on the open round: the one last ticked or failed when several
+are open, or a list called "General" when none is. The last 50 notes per
+round are kept.
+
+Saved data stays small: when a round is closed (its file removed, or
+`/dc clear`), its ticks, fails, snapshots, notes and tagged log lines are
+dropped at the next login. Read the results before closing the round.
 
 ### API
 
@@ -185,10 +221,11 @@ no round open, nothing is recorded and no events are watched.
 | `:Import(markdown[, id])` | Add tasks from a markdown list (format above); `id` is the group when there's no `#` line. Returns how many were added | Yes |
 | `:AddGroup(id)` | Add an empty group | Yes |
 | `:Unpark(id, index)` | Delete a saved task (`index` within that id's saved tasks) and its tick | Yes |
-| `:Clear(id)` | Delete everything for this id: round, saved tasks, passes and fails | Yes |
+| `:Clear(id)` | Delete everything for this id: round, saved tasks, passes, fails, snapshots, notes and its log lines | Yes |
 | `:IsDone(id, text)` | Is this task ticked? | |
 | `:Progress(id)` | Returns `passed, total` | |
-| `:Log(id, text)` | Add a line to the flight recorder (only while a round is open) | Last 100 lines |
+| `:Log(id, ...)` | Add a line to the flight recorder (only while a round is open); values after the id are joined with spaces | Last 100 lines |
+| `:Note(text)` | Same as `/dc note`. Returns the id it was saved under | Last 50 per round |
 | `:Show()` / `:Hide()` / `:Toggle()` | The window | |
 | `:Refresh()` | Redraw the window if it's open | |
 
@@ -212,7 +249,14 @@ DevChecklist_Rounds["MyAddon"] = {
 
 Then add `Rounds\MyAddon.lua` on its own line at the end of
 `DevChecklist.toc`. Round files are local to your copy: this repo doesn't
-ship any.
+ship any. A `/reload` picks up a new or changed round file and the `.toc`
+line.
+
+One file can hold several rounds (one `DevChecklist_Rounds["id"] = { ... }`
+block each). If a script writes your rounds, have it keep a single file in
+the `.toc` and rewrite that file, so a closed round leaves no line behind.
+To close a round, remove its block and reload. [docs/workflow.md](docs/workflow.md)
+walks through the whole loop.
 
 ## Look
 
