@@ -40,9 +40,13 @@ Each round shows its tasks in three parts:
    it when you tried and it failed, **Couldn't** when you had no way to get
    there, or **Skip**. These never keep a round from counting as passed.
 
-Above the rounds: **Run Checks**, **Note** (free text about anything, saved
-with where you were), **Capture**, and **?** (shows or hides the limits
-below).
+Above the rounds is a row of framed buttons: **Run Checks**, **Add Note**
+(free text about anything, saved with where you were), **Capture Screen**
+(a screenshot; chat then names the file to look for), and **?** (shows or
+hides the limits below).
+
+Window too small or too large? `/dc scale 1.4` sets its size (0.8 to 2.0,
+remembered; 1.0 is the default).
 
 - **Fold a group:** click its header. The header shows how many tasks are
   passed (`3/8`, plus a red count of fails). A group folds by itself once
@@ -64,6 +68,12 @@ The window says this too (the **?** button folds it away).
   it ends; Set Up asks you to try again after the fight.
 - **A check proves state, never how something looks.** "The frame is shown
   and 300 wide" can be checked. "It looks right" needs you.
+
+Tested in the live game on the current retail client: free-text notes with
+their surroundings, Something's Off with text, checks running by themselves
+after a reload, the needs section (Couldn't, and a failed answer with a
+note), and Capture (the game's events arrive, the file is written, and the
+saved time matches the file name).
 
 ### Add your own tasks
 
@@ -118,6 +128,7 @@ Round 3: new bag sort. Lines like this one are notes and are skipped.
 | `/dc note text` | Save free text, with where you were, on the open round. With no round open it goes to a "General" list and says so |
 | `/dc shot` | Take a screenshot and note the time on the open round |
 | `/dc run` | Run the checks now |
+| `/dc scale <0.8-2.0>` | Set the window's size (saved; default 1.0). Without a number it prints the current size |
 | `/dc clear <group>` | Delete a group, its tasks and its ticks |
 
 ## For addon authors
@@ -260,7 +271,7 @@ DevChecklistDB = {
         zone = "Dornogal", subzone = "The Stalls", combat = "no", spec = "Fire", level = 80,
         group = 0, groupType = "solo", screen = "3840x2160", uiScale = "0.533", client = "12.0.0 (12345)",
         fps = 60, latency = "20 / 30 ms", mouse = "ContainerFrame1", build = "a1b2c3d",
-        frames = { "ChatFrame1", "ContainerFrame1" },                       -- shown, named top-level frames (first 40)
+        frames = { "StaticPopup1", "ContainerFrame1" },                     -- shown, named top-level frames, dialogs first (up to 40)
         error = "21:03:58 MyAddon/Bags.lua:12: attempt to index a nil value",   -- last Lua error heard, if any
         log = { "21:02:40 reload: Dornogal", "21:03:55 [MyAddon] bags opened" },   -- last 20 log lines
         -- instance = "name / type / difficulty" when inside one
@@ -268,7 +279,8 @@ DevChecklistDB = {
     notes = { ["MyAddon"] = { {           -- from /dc note and the Note box: the same surroundings plus text
         text = "bars flicker at the bank", at = "2026-11-17 21:05:30", round = "MyAddon", zone = "Dornogal", ... } } },
     shots = { ["MyAddon"] = { {           -- from Capture and /dc shot
-        at = "2026-11-17 21:06:02", task = "Open your bags: a Sort button shows.", result = "saved" } } },
+        at = "2026-11-17 21:06:02", task = "Open your bags: a Sort button shows.", result = "saved",
+        file = "WoWScrnShot_111726_210602" } } },   -- the game's file name for that time, without the extension
     log = { "21:02:40 reload: Dornogal", "21:03:10 combat in", ... },   -- flight recorder, last 100 lines
     parked = { ... }, groups = { ... },   -- tasks and groups added in game
 }
@@ -281,7 +293,10 @@ surroundings field is left out when the game could not supply it.
 
 A capture's `result` is `saved` or `failed` as the game reported it, or
 `asked` if the game never answered. The picture itself is a file in the
-game's `Screenshots` folder; match it by `at`.
+game's `Screenshots` folder. `file` is the name the game gives a screenshot
+taken at that moment (the time in the real name can be a second later, and
+the extension follows the game's screenshot format); chat prints it after
+each capture.
 
 The file is plain Lua, so a script can load it instead of searching the
 text. `tools/results.lua` in this repo prints one round (looks with their
@@ -320,10 +335,17 @@ When the tester fails a look or a needs task, the surroundings are saved
 with it in `snap`: round and task, time, zone and subzone, instance,
 combat, spec, level, group size and type, screen size and UI scale, client
 build, fps and latency, the named frame under the mouse, the shown named
-top-level frames, the last Lua error heard, your build label and the last
-20 log lines. Every read is guarded and capped, only reads are made, and
-frames the game forbids are skipped. Passing or clearing the task drops it.
-With no round open, nothing is recorded and no events are watched.
+top-level frames, the last Lua error heard, your build label and 20 log
+lines. Every read is guarded and capped, only reads are made, and frames
+the game forbids are skipped. Passing or clearing the task drops it. With
+no round open, nothing is recorded and no events are watched.
+
+Two things keep a snapshot readable. The frame list leaves out the game's
+own containers that are on screen all the time (and anything without a
+name), and puts dialogs and anything drawn above them first. The log lines
+are the newest ones that belong to this round, which means its own tagged
+lines and untagged ones such as login, zone, combat and errors; lines from
+other rounds are added only when there are fewer than 20.
 
 A note (`/dc note` or the Note box) saves the same surroundings plus the
 text in `notes`, on the open round: the one last ticked or failed when

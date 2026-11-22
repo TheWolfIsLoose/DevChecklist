@@ -95,8 +95,10 @@ The checks run by themselves once the world has loaded.
   found; Run Checks runs them again.
 - **Needs a situation:** Did It, Couldn't or Skip (right click: tried it and
   it failed).
-- **Note** (or `/dc note <text>`) saves anything else the tester notices,
-  with the surroundings.
+- **Add Note** (or `/dc note <text>`) saves anything else the tester
+  notices, with the surroundings. **Capture Screen** (or `/dc shot`) takes a
+  screenshot and prints the file name to look for.
+- `/dc scale 1.4` makes the window larger on a high-resolution screen.
 
 `/reload` once more when done.
 
