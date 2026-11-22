@@ -368,25 +368,69 @@ local function MouseFrame()
     return FrameName(f)
 end
 
--- Named, shown children of UIParent (the first FRAMES_MAX).
+-- The game's own containers that are shown all the time (and this window):
+-- listing them with every snapshot would bury the frames that matter.
+local ALWAYS = {}
+for name in ([[
+    ActionBarController BackpackTokenFrame BagsBar BottomManagedFrameContainer BuffBarCooldownViewer
+    BuffFrame BuffIconCooldownViewer ChatFrame1 ContainerFrameContainer DebuffFrame DevChecklistFrame
+    EncounterBar EssentialCooldownViewer GeneralDockManager GlobalFXBackgroundModelScene
+    GlobalFXDialogModelScene GlobalFXMediumModelScene MainActionBar MainMenuBar
+    MainStatusTrackingBarContainer MicroButtonAndBagsBar MicroMenuContainer MinimapCluster
+    MirrorTimerContainer MotionSicknessFrame MultiBarBottomLeft MultiBarBottomRight MultiBarLeft
+    MultiBarRight ObjectiveTrackerFrame ObjectiveTrackerUIWidgetContainer PetActionBar PlayerFrame
+    PrivateRaidBossEmoteFrameAnchor QuestSessionManager RightManagedFrameContainer RoleChangedFrame
+    SecondaryStatusTrackingBarContainer SpellActivationOverlayFrame StanceBar StatusTrackingBarManager
+    TimerTracker UIErrorsFrame UIPanelLayoutFrame UIWidgetBelowMinimapContainerFrame
+    UIWidgetCenterScreenContainerFrame UIWidgetPowerBarContainerFrame UIWidgetTopCenterContainerFrame
+    UtilityCooldownViewer VoiceActivityManager
+]]):gmatch("%S+") do ALWAYS[name] = true end
+local HIGH = { DIALOG = true, FULLSCREEN = true, FULLSCREEN_DIALOG = true, TOOLTIP = true }
+
+-- Named, shown children of UIParent that are not in ALWAYS: dialogs and
+-- anything above them first, then the rest, FRAMES_MAX at most.
 local function ShownFrames()
-    local out, kids = {}, { UIParent:GetChildren() }
+    local out, rest, seen = {}, {}, {}
+    local kids = { UIParent:GetChildren() }
     for i = 1, #kids do
         local f = kids[i]
         if not f:IsForbidden() and f:IsShown() then
             local name = f:GetName()
-            if name then
-                out[#out + 1] = Cap(name, 60)
-                if #out >= FRAMES_MAX then break end
+            if name and not ALWAYS[name] and not seen[name] then
+                seen[name] = true
+                local t = HIGH[f:GetFrameStrata()] and out or rest
+                t[#t + 1] = Cap(name, 60)
             end
         end
     end
+    for i = 1, #rest do out[#out + 1] = rest[i] end
+    for i = #out, FRAMES_MAX + 1, -1 do out[i] = nil end
+    return out
+end
+
+-- The last SNAP_LINES log lines that matter for this round: its own tagged
+-- lines and untagged ones (login, reload, zone, combat, error) first; lines
+-- of other rounds only fill what is left. Returned oldest first.
+local function LogTail(id)
+    local log, pick, n = db.log, {}, 0
+    local own = "[" .. tostring(id) .. "]"
+    for pass = 1, 2 do
+        for i = #log, 1, -1 do
+            if n >= SNAP_LINES then break end
+            if not pick[i] then
+                local tag = log[i]:match("^%S+ (%[[^%]]+%])")
+                if pass == 2 or not tag or tag == own then pick[i] = true; n = n + 1 end
+            end
+        end
+    end
+    local out = {}
+    for i = 1, #log do if pick[i] then out[#out + 1] = log[i] end end
     return out
 end
 
 local function Surround(id, text)
     local r = DevChecklist_Rounds[id]
-    local s = { at = date("%Y-%m-%d %H:%M:%S"), round = id, task = Cap(text, VALUE_MAX), log = {} }
+    local s = { at = date("%Y-%m-%d %H:%M:%S"), round = id, task = Cap(text, VALUE_MAX) }
     s.zone = Cap(Try(ZoneLine)) or "?"        -- includes the instance and difficulty when inside one
     s.subzone = Cap(Nz(Try(GetSubZoneText) or ""))
     local name, kind, _, diff = Try(GetInstanceInfo)
@@ -410,7 +454,7 @@ local function Surround(id, text)
     s.frames = Try(ShownFrames)
     s.error = lastError
     s.build = type(r) == "table" and Cap(r.build, VALUE_MAX) or nil
-    for i = math.max(1, #db.log - SNAP_LINES + 1), #db.log do s.log[#s.log + 1] = db.log[i] end
+    s.log = LogTail(id)
     return s
 end
 
@@ -629,20 +673,27 @@ local function SetUp(it)
 end
 
 local function EndShot(result)
-    if pendingShot then pendingShot.result = result end
+    if pendingShot then
+        pendingShot.result = result
+        Print(result == "saved"
+            and ("capture saved. Look for " .. pendingShot.file .. " in the game's Screenshots folder (the time in the name can be a second later).")
+            or "capture failed: the game did not take the screenshot.")
+    end
     pendingShot = nil
     ev:UnregisterEvent("SCREENSHOT_SUCCEEDED")
     ev:UnregisterEvent("SCREENSHOT_FAILED")
 end
 
--- Ask the game for a screenshot and save when, for which round and task, and
--- how it went ("saved", "failed", or "asked" when the game never said), so
--- the file in the game's Screenshots folder can be matched by time.
+-- Ask the game for a screenshot and save when, for which round and task,
+-- how it went ("saved", "failed", or "asked" when the game never said) and
+-- the file name the game gives a screenshot taken at that time (without the
+-- extension, which follows the game's screenshot format setting).
 -- Returns the id it was saved under and the time.
 function DC:Capture(id, text)
     if not db then return end
     id = id or OpenRound() or "General"
-    local shot = { at = date("%Y-%m-%d %H:%M:%S"), task = Cap(text, VALUE_MAX), result = "asked" }
+    local shot = { at = date("%Y-%m-%d %H:%M:%S"), task = Cap(text, VALUE_MAX), result = "asked",
+        file = "WoWScrnShot_" .. date("%m%d%y_%H%M%S") }
     local list = db.shots[id] or {}
     db.shots[id] = list
     list[#list + 1] = shot
@@ -651,7 +702,6 @@ function DC:Capture(id, text)
     ev:RegisterEvent("SCREENSHOT_SUCCEEDED")
     ev:RegisterEvent("SCREENSHOT_FAILED")
     if not pcall(Screenshot) then EndShot("failed") end
-    Print("capture " .. shot.result .. " at " .. shot.at .. " (" .. id .. "). The file is in the game's Screenshots folder.")
     return id, shot.at
 end
 
@@ -771,6 +821,7 @@ local function Build()
     frame:SetMovable(true)
     frame:EnableMouse(true)
     Panel(frame, 0.031, 0.8)
+    if db.scale then frame:SetScale(db.scale) end
     local pt = db.point or { "TOPLEFT", "TOPLEFT", 40, -200 }
     frame:SetPoint(pt[1], UIParent, pt[2], pt[3], pt[4])
 
@@ -986,17 +1037,21 @@ Layout = function()
     local rounds = Rounds()
 
     -- Tools: run the checks, write a note, take a screenshot, show the limits.
+    -- Framed and set apart, so they do not read as part of the title bar.
     local hasChecks = false
     for _, r in ipairs(rounds) do
         for _, it in ipairs(r.items) do if it.kind == "check" then hasChecks = true end end
     end
     local tx = PAD
+    y = y - 4
     local function Tool(label, width, fn)
         local b = Button(body, label, width)
         b:SetHeight(18)
+        b:SetBackdropColor(0.13, 0.13, 0.13, 1)
+        b:SetBackdropBorderColor(0.45, 0.45, 0.45, 1)
         b:SetPoint("TOPLEFT", tx, y)
         b:SetScript("OnClick", fn)
-        tx = tx + width + 4
+        tx = tx + width + 6
     end
     if hasChecks then
         Tool("Run Checks", 76, function()
@@ -1004,13 +1059,18 @@ Layout = function()
             if n then Print(n .. (n == 1 and " check ran, " or " checks ran, ") .. bad .. " failed.") end
         end)
     end
-    Tool("Note", 40, function()
+    Tool("Add Note", 66, function()
         if editing and editing.kind == "roundnote" then editing = nil else editing = { kind = "roundnote" } end
         Layout()
     end)
-    Tool("Capture", 56, function() DC:Capture() end)
-    Tool("?", 20, function() db.limits = db.limits == false; Layout() end)
-    y = y - 22
+    Tool("Capture Screen", 98, function() DC:Capture() end)
+    Tool("?", 22, function() db.limits = db.limits == false; Layout() end)
+    y = y - 24
+    local rule = body:CreateTexture(nil, "ARTWORK")
+    rule:SetColorTexture(1, 1, 1, 0.12)
+    rule:SetPoint("TOPLEFT", PAD, y)
+    rule:SetSize(W - 2 * PAD, Px(body))
+    y = y - 6
     if checksWaiting then
         local wait = Text(body, 11, FAIL)
         wait:SetPoint("TOPLEFT", PAD, y - 2)
@@ -1470,11 +1530,19 @@ SlashCmdList.DEVCHECKLIST = function(msg)
         SayNote(DC:Note(rest))
     elseif cmd == "shot" then
         DC:Capture()
+    elseif cmd == "scale" then
+        local n = tonumber(rest)
+        if n then
+            db.scale = math.min(2, math.max(0.8, n))
+            if frame then frame:SetScale(db.scale) end
+            DC:Refresh()
+        end
+        Print(("window size %.2f. /dc scale <0.8 to 2.0> changes it."):format(db.scale or 1))
     elseif cmd == "run" then
         local n, bad = DC:RunChecks()
         Print(n and (n .. (n == 1 and " check ran, " or " checks ran, ") .. bad .. " failed.")
             or "in combat: the checks run when it ends.")
     else
-        Print("|cffffffff/dc|r show or hide  |cffffffff/dc add [area:] text|r park an item  |cffffffff/dc note text|r note for the open round  |cffffffff/dc shot|r screenshot  |cffffffff/dc run|r run the checks  |cffffffff/dc clear <round>|r drop a round and its ticks")
+        Print("|cffffffff/dc|r show or hide  |cffffffff/dc add [area:] text|r park an item  |cffffffff/dc note text|r note for the open round  |cffffffff/dc shot|r screenshot  |cffffffff/dc run|r run the checks  |cffffffff/dc scale 0.8-2.0|r window size  |cffffffff/dc clear <round>|r drop a round and its ticks")
     end
 end

@@ -107,7 +107,8 @@ local shots = of("shots")
 if #shots > 0 then
     print("== Captures (match the file in the game's Screenshots folder by time)")
     for _, c in ipairs(shots) do
-        print(("  %s | %s | %s"):format(tostring(c.at), tostring(c.result), tostring(c.task or "(no task)")))
+        print(("  %s | %s | %s%s"):format(tostring(c.at), tostring(c.result), tostring(c.task or "(no task)"),
+            c.file and (" | " .. c.file) or ""))
     end
 end
 

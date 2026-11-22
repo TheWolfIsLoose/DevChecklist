@@ -54,12 +54,14 @@ GetPhysicalScreenSize = function() return 3840, 2160 end
 GetBuildInfo = function() return "12.0.0", "12345" end
 GetFramerate = function() return 59.6 end
 GetNetStats = function() return 1, 2, 20, 30 end
-local function Named(name, shown, forbidden)
-  return { IsForbidden = function() return forbidden end, IsShown = function() return shown end, GetName = function() return name end }
+local function Named(name, shown, forbidden, strata)
+  return { IsForbidden = function() return forbidden end, IsShown = function() return shown end, GetName = function() return name end,
+    GetFrameStrata = function() return strata or "MEDIUM" end }
 end
 GetMouseFoci = function() return { Named("MouseFrameName", true) } end
 rawset(UIParent, "GetChildren", function()
-  return Named("ShownOne", true), Named("HiddenOne", false), Named("Locked", true, true), Named(nil, true), Named("ShownTwo", true)
+  return Named("MinimapCluster", true), Named("ShownOne", true), Named("HiddenOne", false), Named("Locked", true, true), Named(nil, true),
+    Named("ShownTwo", true), Named("ShownOne", true), Named("DevChecklistFrame", true), Named("DialogOne", true, false, "DIALOG")
 end)
 local shiftDown, shots = false, 0
 IsShiftKeyDown = function() return shiftDown end
@@ -431,7 +433,8 @@ do
   assert(s.zone == "Dornogal" and s.subzone == "The Stalls" and s.combat == "no" and s.spec == "Fire" and s.level == 80, "place and character")
   assert(s.group == 0 and s.groupType == "solo" and s.screen == "3840x2160" and s.uiScale == "1.000", "group and screen")
   assert(s.client == "12.0.0 (12345)" and s.fps == 60 and s.latency == "20 / 30 ms" and s.mouse == "MouseFrameName", "client, fps, latency, mouse")
-  assert(#s.frames == 2 and s.frames[1] == "ShownOne" and s.frames[2] == "ShownTwo", "shown named frames only")
+  assert(#s.frames == 3 and s.frames[1] == "DialogOne" and s.frames[2] == "ShownOne" and s.frames[3] == "ShownTwo",
+    "frames: dialogs first; no always-shown game containers, hidden, forbidden, unnamed or repeated ones: " .. table.concat(s.frames, ","))
   assert(s.error and s.error:find("boom in File.lua:1", 1, true) and #s.log <= 20 and not s.instance, "last error and log lines")
   box = NoteBox()
   shiftDown = true; box._text = "line one"; box._OnEnterPressed(box)
@@ -449,12 +452,48 @@ do
   assert(nt.text == "still works" and nt.latency == nil and nt.level == nil and nt.frames == nil and nt.zone == "Dornogal", "guarded reads")
   GetNetStats, UnitLevel = oldNet, oldLevel; rawset(UIParent, "GetChildren", oldKids)
 
+  -- the frame list is capped at 40
+  rawset(UIParent, "GetChildren", function()
+    local t = {}; for i = 1, 60 do t[i] = Named("Many" .. i, true, false, i == 60 and "TOOLTIP" or nil) end; return unpack(t)
+  end)
+  SlashCmdList.DEVCHECKLIST("note many frames"); nt = db.notes.K[#db.notes.K]
+  assert(#nt.frames == 40 and nt.frames[1] == "Many60" and nt.frames[2] == "Many1", "frame list capped, high strata first")
+  rawset(UIParent, "GetChildren", oldKids)
+
+  -- log lines in a snapshot: this round's and untagged ones first, others only to fill up
+  local oldLog = db.log
+  db.log = { "10:00:00 [K] first", "10:00:01 login: Dornogal" }
+  for i = 1, 25 do db.log[#db.log + 1] = "10:01:00 [Other] spam " .. i end
+  db.log[#db.log + 1] = "10:02:00 zone: Dornogal"
+  SlashCmdList.DEVCHECKLIST("note log pick"); nt = db.notes.K[#db.notes.K]
+  local others = 0; for _, l in ipairs(nt.log) do if l:find("[Other]", 1, true) then others = others + 1 end end
+  assert(#nt.log == 20 and nt.log[1] == "10:00:00 [K] first" and nt.log[2] == "10:00:01 login: Dornogal" and nt.log[20] == "10:02:00 zone: Dornogal"
+    and others == 17 and nt.log[3] == "10:01:00 [Other] spam 9", "own and untagged lines kept, newest others fill the rest, oldest first")
+  for i = 1, 30 do db.log[#db.log + 1] = "10:03:00 [K] mine " .. i end
+  SlashCmdList.DEVCHECKLIST("note log full"); nt = db.notes.K[#db.notes.K]
+  others = 0; for _, l in ipairs(nt.log) do if l:find("[Other]", 1, true) then others = others + 1 end end
+  assert(#nt.log == 20 and others == 0 and nt.log[20] == "10:03:00 [K] mine 30", "enough own lines: no other round's lines")
+  db.log = oldLog
+
+  -- /dc scale: saved, clamped, applied to the window
+  local scaled
+  rawset(frameObj, "SetScale", function(_, v) scaled = v end)
+  assert(db.scale == nil, "no size saved by default")
+  SlashCmdList.DEVCHECKLIST("scale 1.5"); assert(db.scale == 1.5 and scaled == 1.5, "scale set")
+  SlashCmdList.DEVCHECKLIST("scale 9"); assert(db.scale == 2 and scaled == 2, "scale clamped high")
+  SlashCmdList.DEVCHECKLIST("scale 0.1"); assert(db.scale == 0.8 and scaled == 0.8, "scale clamped low")
+  SlashCmdList.DEVCHECKLIST("scale big"); assert(db.scale == 0.8 and printed[#printed]:find("window size 0.80", 1, true), "bad number changes nothing")
+  SlashCmdList.DEVCHECKLIST("scale 1"); assert(db.scale == 1 and scaled == 1, "back to 1")
+
+  -- the tool row says what each button does
+  Redraw(); assert(Btn("Add Note") and Btn("Capture Screen") and Btn("Run Checks") and Btn("?"), "tool row labels")
+
   -- an instance shows in the surroundings
   local oldInfo = GetInstanceInfo; GetInstanceInfo = function() return "The Depths", "party", 23, "Mythic" end
   -- the Note box in the window: any length up to 4000, with the surroundings
-  Click("Note"); box = NoteBox(); box._text = ("n"):rep(5000); box._OnEnterPressed(box)
+  Click("Add Note"); box = NoteBox(); box._text = ("n"):rep(5000); box._OnEnterPressed(box)
   nt = db.notes.K[#db.notes.K]
-  assert(#nt.text == 4000 and nt.round == "K" and nt.instance == "The Depths / party / Mythic" and #nt.frames == 2 and type(nt.log) == "table", "window note with surroundings")
+  assert(#nt.text == 4000 and nt.round == "K" and nt.instance == "The Depths / party / Mythic" and #nt.frames == 3 and type(nt.log) == "table", "window note with surroundings")
   GetInstanceInfo = oldInfo
 
   -- needs: Couldn't, Skip, Did It, and a right click for tried-and-failed
@@ -486,6 +525,7 @@ do
   assert(shots == s0 + 1 and list[#list].result == "asked" and list[#list].at == at and reg.SCREENSHOT_SUCCEEDED and reg.SCREENSHOT_FAILED, "capture asked")
   fire(nil, "SCREENSHOT_SUCCEEDED")
   assert(list[#list].result == "saved" and not reg.SCREENSHOT_SUCCEEDED and not reg.SCREENSHOT_FAILED, "capture saved, events dropped")
+  assert(list[#list].file:match("^WoWScrnShot_%d%d%d%d%d%d_%d%d%d%d%d%d$") and printed[#printed]:find("Look for " .. list[#list].file, 1, true), "capture names the file to look for")
   Click("Capture", "Bad setup")
   assert(shots == s0 + 2 and db.shots.K[#db.shots.K].task == "Bad setup", "capture from a task")
   fire(nil, "SCREENSHOT_FAILED"); assert(db.shots.K[#db.shots.K].result == "failed", "capture failed")
@@ -525,7 +565,7 @@ do
     local text = table.concat(got, "\n")
     for _, want in ipairs({
       "round passed: no", "[x] Panel looks right  -- yyy", "[FAIL] Slash look  -- line one", "subzone The Stalls",
-      "frames shown: ShownOne, ShownTwo", "== Checked by code", "[ok] State is one = 1", "[FAIL] Errors out = ",
+      "frames shown: DialogOne, ShownOne, ShownTwo", "WoWScrnShot_", "== Checked by code", "[ok] State is one = 1", "[FAIL] Errors out = ",
       "== Needs a situation", "[pass] Works in a group  (needs: a group of five)", "[fail] Works on a keypress",
       "== Notes", "still works", "instance The Depths / party / Mythic", "== Captures", "| asked | many 11", "| asked | many 40",
     }) do
