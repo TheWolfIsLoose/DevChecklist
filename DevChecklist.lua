@@ -1,13 +1,15 @@
 --[[
     Dev Checklist: a small in-game list of what to test, for any addon project.
 
-    Every task belongs to a group id (usually an addon name). Tasks come
+    A task is one of three kinds: a look (a person judges it), a check (a
+    function decides it) or a needs (it needs a situation the addon cannot
+    make). Every task belongs to a group id (usually an addon name). Tasks come
     from code (DevChecklist:Register / :Add for this session, :Park / :Import
     saved), round files in Rounds/, or the window (+, Import, /dc add). One
     id never touches another id's tasks or ticks. Passes are saved in
     DevChecklistDB.done[id][task text], fails (with a one-line note) in
-    DevChecklistDB.fail[id][task text], /dc note lines in
-    DevChecklistDB.notes[id], and a per-round summary is written to
+    DevChecklistDB.fail[id][task text], check results in DevChecklistDB.check,
+    notes in DevChecklistDB.notes[id], and a per-round summary is written to
     DevChecklistDB.report on reload and logout. README.md has the full guide
     and API.
 
@@ -27,6 +29,10 @@ local MUTED = { 0.5, 0.5, 0.5 }        -- muted text
 local FAIL = { 0.9, 0.3, 0.3 }         -- failed item
 local db, frame, Layout
 local lastId                           -- round id last ticked or failed (where /dc note goes if several are open)
+local ev                               -- our event frame (made under Load)
+local lastError                        -- last Lua error heard while recording
+local checksWaiting = false            -- Run Checks was asked for in combat
+local pendingShot                      -- capture waiting for the game to say how it went
 local editing                          -- open inline form: { kind = "group" } or { kind = "task", id =, area = }
 local armed = {}                       -- group id -> time its delete was armed
 local pending = {}                     -- Park / AddGroup / Import calls made before our saved data loaded
@@ -173,11 +179,20 @@ end
 
 -- Data --------------------------------------------------------------------
 
+-- A task as written: a string (a look), { area, text, send }, or a table
+-- with named fields. kind is "look" (the default: a person judges it, setup
+-- is optional), "check" (run() returns ok, value) or "needs" (needs says
+-- what situation it takes).
 local function Item(it)
+    if type(it) == "string" then it = { text = it } end
     if type(it) ~= "table" then return end
     local text = it.text or it[2]
     if type(text) ~= "string" or text == "" then return end
-    return { area = tostring(it.area or it[1] or ""), text = text, send = it.send or it[3] }
+    return {
+        area = tostring(it.area or it[1] or ""), text = text, send = it.send or it[3],
+        kind = (it.kind == "check" or it.kind == "needs") and it.kind or "look",
+        run = it.run, setup = it.setup, needs = it.needs,
+    }
 end
 
 -- Every round with items: code / file rounds, then parked items under the same id. Sorted by id.
@@ -215,6 +230,19 @@ end
 -- A failed item's note (may be ""), or nil when it hasn't failed.
 local function Failed(id, text) return db and db.fail[id] and db.fail[id][text] end
 
+-- A needs item's other answer: "couldnt" or "skip" (nil: not answered that way).
+local function Needs(id, text) return db and db.needs[id] and db.needs[id][text] end
+
+-- What the tester added to a passed item, or nil.
+local function Remark(id, text) return db and db.remark[id] and db.remark[id][text] end
+
+-- Is this task (as written in a round) still waiting for an answer? A fail
+-- waits for a retest; a needs item answered "couldnt" or "skip" does not.
+local function Waiting(id, it)
+    local x = Item(it)
+    return x and not Done(id, x.text) and not (x.kind == "needs" and Needs(id, x.text))
+end
+
 local function Drop(t, id) if t[id] and not next(t[id]) then t[id] = nil end end
 
 -- Flight recorder ---------------------------------------------------------
@@ -226,6 +254,7 @@ local function Drop(t, id) if t[id] and not next(t[id]) then t[id] = nil end end
 -- nothing recorded.
 
 local LOG_MAX, SNAP_LINES, LINE_MAX, NOTE_MAX = 100, 20, 300, 50
+local TEXT_MAX, VALUE_MAX, FIELD_MAX, FRAMES_MAX, SHOT_MAX = 4000, 200, 120, 40, 30
 local rec                              -- event frame, made the first time a round opens
 local recording = false
 
@@ -252,7 +281,9 @@ local function OnBug(_, err)
         if ok and e then err = e end
     end
     local m = type(err) == "table" and err.message or err
-    AddLog("error: " .. tostring(m):gsub("[\r\n]+", " "):sub(1, 160))
+    m = tostring(m):gsub("[\r\n]+", " ")
+    lastError = date("%H:%M:%S") .. " " .. m:sub(1, LINE_MAX)
+    AddLog("error: " .. m:sub(1, 160))
 end
 
 local function OnRecEvent(_, event, a, b)
@@ -292,33 +323,93 @@ local function SetRecording(on)
     end
 end
 
--- Record while any code or file round has a task not yet passed.
+-- Record while any code or file round has a task still waiting.
 local function Arm()
     if not db then return end
     for id, r in pairs(DevChecklist_Rounds) do
         if type(r) == "table" and type(r.items) == "table" then
             for _, it in ipairs(r.items) do
-                local text = type(it) == "table" and (it.text or it[2])
-                if type(text) == "string" and text ~= "" and not Done(id, text) then SetRecording(true) return end
+                if Waiting(id, it) then SetRecording(true) return end
             end
         end
     end
     SetRecording(false)
 end
 
-local function Snapshot(id)
-    local spec = GetSpecialization()
-    if spec then spec = select(2, GetSpecializationInfo(spec)) end
+-- Surroundings ------------------------------------------------------------
+-- Where the tester was, saved with every fail and every note. Each read is
+-- guarded (a missing or failing game function leaves its field out) and
+-- capped. Only reads: nothing protected is called, and frames are walked
+-- from UIParent's children with IsForbidden checked first.
+
+local function Try(fn, ...)
+    if type(fn) ~= "function" then return end
+    local ok, a, b, c, d = pcall(fn, ...)
+    if ok then return a, b, c, d end
+end
+
+-- Any value as one short line, or nil.
+local function Cap(v, n)
+    if v == nil then return end
+    local ok, s = pcall(tostring, v)
+    if not ok then return end
+    s = s:gsub("[\r\n]+", " ")
+    return s:sub(1, n or FIELD_MAX)
+end
+
+local function FrameName(f)
+    if type(f) ~= "table" or not f.IsForbidden or f:IsForbidden() then return end
+    return Cap(f.GetName and f:GetName() or f.GetDebugName and f:GetDebugName())
+end
+
+local function MouseFrame()
+    local f
+    if GetMouseFoci then f = GetMouseFoci()[1] elseif GetMouseFocus then f = GetMouseFocus() end
+    return FrameName(f)
+end
+
+-- Named, shown children of UIParent (the first FRAMES_MAX).
+local function ShownFrames()
+    local out, kids = {}, { UIParent:GetChildren() }
+    for i = 1, #kids do
+        local f = kids[i]
+        if not f:IsForbidden() and f:IsShown() then
+            local name = f:GetName()
+            if name then
+                out[#out + 1] = Cap(name, 60)
+                if #out >= FRAMES_MAX then break end
+            end
+        end
+    end
+    return out
+end
+
+local function Surround(id, text)
     local r = DevChecklist_Rounds[id]
-    local s = {
-        at = date("%Y-%m-%d %H:%M:%S"),
-        zone = ZoneLine(),                    -- includes the instance and difficulty when inside one
-        combat = InCombatLockdown() and "yes" or "no",
-        spec = spec or "none",
-        group = GetNumGroupMembers(),
-        build = type(r) == "table" and r.build or nil,
-        log = {},
-    }
+    local s = { at = date("%Y-%m-%d %H:%M:%S"), round = id, task = Cap(text, VALUE_MAX), log = {} }
+    s.zone = Cap(Try(ZoneLine)) or "?"        -- includes the instance and difficulty when inside one
+    s.subzone = Cap(Nz(Try(GetSubZoneText) or ""))
+    local name, kind, _, diff = Try(GetInstanceInfo)
+    if kind and kind ~= "none" then s.instance = Cap((Nz(name) or "?") .. " / " .. kind .. " / " .. (Nz(diff) or "?")) end
+    s.combat = Try(InCombatLockdown) and "yes" or "no"
+    s.spec = Cap(Try(function() local i = GetSpecialization(); return i and select(2, GetSpecializationInfo(i)) end)) or "none"
+    s.level = tonumber((Try(UnitLevel, "player")))
+    s.group = tonumber((Try(GetNumGroupMembers))) or 0
+    s.groupType = Try(IsInRaid) and "raid" or Try(IsInGroup) and "party" or "solo"
+    local w, h = Try(GetPhysicalScreenSize)
+    if tonumber(w) and tonumber(h) then s.screen = ("%dx%d"):format(w, h) end
+    local scale = tonumber((Try(function() return UIParent:GetEffectiveScale() end)))
+    if scale then s.uiScale = ("%.3f"):format(scale) end
+    local version, number = Try(GetBuildInfo)
+    if version then s.client = Cap(tostring(version) .. " (" .. tostring(number) .. ")") end
+    local fps = tonumber((Try(GetFramerate)))
+    if fps then s.fps = math.floor(fps + 0.5) end
+    local _, _, home, world = Try(GetNetStats)
+    if home then s.latency = Cap(tostring(home) .. " / " .. tostring(world) .. " ms") end
+    s.mouse = Try(MouseFrame)
+    s.frames = Try(ShownFrames)
+    s.error = lastError
+    s.build = type(r) == "table" and Cap(r.build, VALUE_MAX) or nil
     for i = math.max(1, #db.log - SNAP_LINES + 1), #db.log do s.log[#s.log + 1] = db.log[i] end
     return s
 end
@@ -335,12 +426,15 @@ local function SetDone(id, text, on)
     Drop(db.done, id)
     if on and db.fail[id] then db.fail[id][text] = nil; Drop(db.fail, id) end
     if on then DropSnap(id, text) end
+    if on and db.needs[id] then db.needs[id][text] = nil; Drop(db.needs, id) end
+    if not on and db.remark[id] then db.remark[id][text] = nil; Drop(db.remark, id) end
     Arm()
 end
 
 -- note = nil clears the fail; a string (even "") marks it failed. The first
--- fail takes a snapshot; adding the note later keeps it.
-local function SetFail(id, text, note)
+-- fail saves the surroundings (not for a check: bare); adding the note later
+-- keeps them.
+local function SetFail(id, text, note, bare)
     lastId = id
     if note == nil then
         if db.fail[id] then db.fail[id][text] = nil; Drop(db.fail, id) end
@@ -348,29 +442,47 @@ local function SetFail(id, text, note)
         return
     end
     db.fail[id] = db.fail[id] or {}
-    if db.fail[id][text] == nil then
+    if db.fail[id][text] == nil and not bare then
         db.snap[id] = db.snap[id] or {}
-        db.snap[id][text] = Snapshot(id)
+        db.snap[id][text] = Surround(id, text)
     end
-    db.fail[id][text] = note
+    db.fail[id][text] = note:sub(1, TEXT_MAX)
     if db.done[id] then db.done[id][text] = nil; Drop(db.done, id) end
+    if db.needs[id] then db.needs[id][text] = nil; Drop(db.needs, id) end
+    if db.remark[id] then db.remark[id][text] = nil; Drop(db.remark, id) end
     Arm()
 end
 
--- Quick notes -------------------------------------------------------------
--- /dc note <text> saves one stamped line (time, zone, combat, spec, group,
--- build) in DevChecklistDB.notes[id], on the open round's report. Nothing runs
--- until the command is typed.
+-- A needs item the tester could not do ("couldnt") or left out ("skip");
+-- nil clears it. It replaces a pass or fail, and a pass or fail replaces it.
+local function SetNeeds(id, text, answer)
+    if answer then SetDone(id, text, false); SetFail(id, text, nil) end
+    db.needs[id] = db.needs[id] or {}
+    db.needs[id][text] = answer
+    Drop(db.needs, id)
+    Arm()
+end
 
--- The round a note belongs to: one with a task not yet passed (the one last
+-- Free text on a passed item ("" or nil clears it).
+local function SetRemark(id, text, remark)
+    db.remark[id] = db.remark[id] or {}
+    db.remark[id][text] = (remark and remark ~= "") and remark:sub(1, TEXT_MAX) or nil
+    Drop(db.remark, id)
+end
+
+-- Quick notes -------------------------------------------------------------
+-- /dc note <text> (or the Note box in the window) saves free text with the
+-- surroundings in DevChecklistDB.notes[id], on the open round. Nothing runs
+-- until the tester asks.
+
+-- The round a note belongs to: one with a task still waiting (the one last
 -- ticked or failed when several are open), or nil.
 local function OpenRound()
     local first
     for id, r in pairs(DevChecklist_Rounds) do
         if type(r) == "table" and type(r.items) == "table" then
             for _, it in ipairs(r.items) do
-                local text = type(it) == "table" and (it.text or it[2])
-                if type(text) == "string" and text ~= "" and not Done(id, text) then
+                if Waiting(id, it) then
                     if id == lastId then return id end
                     if not first or id < first then first = id end
                     break
@@ -386,8 +498,8 @@ function DC:Note(text)
     text = Trim(text)
     if text == "" or not db then return end
     local id = OpenRound()
-    local s = Snapshot(id or "General")
-    s.log, s.text = nil, text:sub(1, 250)
+    local s = Surround(id or "General")
+    s.text = text:sub(1, TEXT_MAX)
     local list = db.notes[id or "General"] or {}
     db.notes[id or "General"] = list
     list[#list + 1] = s
@@ -395,13 +507,17 @@ function DC:Note(text)
     return id or "General", id == nil
 end
 
--- passed, failed counts for one round.
+-- passed, failed, total for one round. Needs items are left out: they never
+-- hold a round back.
 local function Tally(r)
-    local p, f = 0, 0
+    local p, f, n = 0, 0, 0
     for _, it in ipairs(r.items) do
-        if Done(r.id, it.text) then p = p + 1 elseif Failed(r.id, it.text) then f = f + 1 end
+        if it.kind ~= "needs" then
+            n = n + 1
+            if Done(r.id, it.text) then p = p + 1 elseif Failed(r.id, it.text) then f = f + 1 end
+        end
     end
-    return p, f
+    return p, f, n
 end
 
 local function CountText(p, n, f)
@@ -435,6 +551,108 @@ function DC:Log(id, ...)
     local parts = {}
     for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
     AddLog("[" .. tostring(id) .. "] " .. table.concat(parts, " "):gsub("[\r\n]+", " "):sub(1, LINE_MAX))
+end
+
+-- Checks, Set Up, Capture --------------------------------------------------
+
+-- Run every check task: run() is called guarded and returns ok, value. An
+-- error is a fail whose value is the error text. Never in combat: asked for
+-- in combat, the checks run once when it ends. Returns how many ran and how
+-- many failed, or nil while waiting.
+local function RunChecks()
+    if not db then return end
+    if InCombatLockdown() then
+        checksWaiting = true
+        ev:RegisterEvent("PLAYER_REGEN_ENABLED")
+        return
+    end
+    if checksWaiting then
+        checksWaiting = false
+        ev:UnregisterEvent("PLAYER_REGEN_ENABLED")
+    end
+    local keep, n, bad = lastId, 0, 0
+    for _, r in ipairs(Rounds()) do
+        for _, it in ipairs(r.items) do
+            if it.kind == "check" then
+                local ok, pass, value = pcall(it.run)
+                if not ok then pass, value = false, pass end
+                value = Cap(value, VALUE_MAX)
+                db.check[r.id] = db.check[r.id] or {}
+                db.check[r.id][it.text] = { ok = pass and true or false, value = value, at = date("%Y-%m-%d %H:%M:%S") }
+                if pass then
+                    SetDone(r.id, it.text, true)
+                else
+                    SetFail(r.id, it.text, value or "", true)
+                    bad = bad + 1
+                end
+                n = n + 1
+            end
+        end
+    end
+    lastId = keep
+    return n, bad
+end
+
+function DC:RunChecks()
+    local n, bad = RunChecks()
+    DC:Refresh()
+    return n, bad
+end
+
+-- An addon's own slash command, found in SlashCmdList and called directly.
+-- The game's secure commands (/cast, /target, ...) are not there and cannot
+-- be run from code.
+local function RunSlash(line)
+    local cmd, rest = tostring(line):match("^%s*(/%S+)%s*(.-)%s*$")
+    if not cmd then error("not a slash command: " .. tostring(line), 0) end
+    cmd = cmd:lower()
+    for name, fn in pairs(SlashCmdList) do
+        local i = 1
+        while type(_G["SLASH_" .. name .. i]) == "string" do
+            if _G["SLASH_" .. name .. i]:lower() == cmd then fn(rest) return end
+            i = i + 1
+        end
+    end
+    error("no addon command " .. cmd, 0)
+end
+
+-- Run a look's setup (a function or an addon slash command). Refused in
+-- combat. Returns true when it ran without an error.
+local function SetUp(it)
+    if InCombatLockdown() then
+        Print("Set Up waits for combat to end. Try again after the fight.")
+        return false
+    end
+    local ok, err = pcall(type(it.setup) == "function" and it.setup or RunSlash, it.setup)
+    if not ok then Print("Set Up failed: " .. (Cap(err, VALUE_MAX) or "?")) end
+    return ok
+end
+
+local function EndShot(result)
+    if pendingShot then pendingShot.result = result end
+    pendingShot = nil
+    ev:UnregisterEvent("SCREENSHOT_SUCCEEDED")
+    ev:UnregisterEvent("SCREENSHOT_FAILED")
+end
+
+-- Ask the game for a screenshot and save when, for which round and task, and
+-- how it went ("saved", "failed", or "asked" when the game never said), so
+-- the file in the game's Screenshots folder can be matched by time.
+-- Returns the id it was saved under and the time.
+function DC:Capture(id, text)
+    if not db then return end
+    id = id or OpenRound() or "General"
+    local shot = { at = date("%Y-%m-%d %H:%M:%S"), task = Cap(text, VALUE_MAX), result = "asked" }
+    local list = db.shots[id] or {}
+    db.shots[id] = list
+    list[#list + 1] = shot
+    while #list > SHOT_MAX do table.remove(list, 1) end
+    pendingShot = shot
+    ev:RegisterEvent("SCREENSHOT_SUCCEEDED")
+    ev:RegisterEvent("SCREENSHOT_FAILED")
+    if not pcall(Screenshot) then EndShot("failed") end
+    Print("capture " .. shot.result .. " at " .. shot.at .. " (" .. id .. "). The file is in the game's Screenshots folder.")
+    return id, shot.at
 end
 
 -- Replace this id's round (this session). Ticks for items with the same text carry over.
@@ -519,7 +737,7 @@ function DC:Clear(id)
     DevChecklist_Rounds[id] = nil
     if db then
         db.parked[id], db.done[id], db.fail[id], db.snap[id], db.collapsed[id], db.groups[id] = nil, nil, nil, nil, nil, nil
-        db.notes[id] = nil
+        db.notes[id], db.check[id], db.needs[id], db.remark[id], db.shots[id] = nil, nil, nil, nil, nil
         -- Its log lines too ("[id] ..."), so a cleared round leaves no trail.
         local tag, keep = "[" .. id .. "]", {}
         for _, line in ipairs(db.log or {}) do
@@ -532,13 +750,12 @@ end
 
 function DC:IsDone(id, text) return Done(id, text) end
 
--- done, total for one id.
+-- passed, total for one id (needs items are not counted).
 function DC:Progress(id)
     for _, r in ipairs(Rounds()) do
         if r.id == id then
-            local n = 0
-            for _, it in ipairs(r.items) do if Done(id, it.text) then n = n + 1 end end
-            return n, #r.items
+            local p, _, n = Tally(r)
+            return p, n
         end
     end
     return 0, 0
@@ -612,10 +829,10 @@ local function Build()
     end)
 end
 
--- Fold state is saved per id; unset, a round folds once all of it is ticked.
-local function Folded(r, done)
+-- Fold state is saved per id; unset, a round folds once nothing in it is waiting.
+local function Folded(r, settled)
     local c = db.collapsed[r.id]
-    if c == nil then return done == #r.items end
+    if c == nil then return settled end
     return c
 end
 
@@ -663,18 +880,51 @@ local function TaskForm(body, y, id)
     return 44
 end
 
--- One-line note under a failed item. Enter saves, Esc closes (the fail stays).
-local function NoteForm(body, y, id, text)
-    local e = Field(body, W - 2 * PAD - 20, "What went wrong? Enter saves")
-    e:SetPoint("TOPLEFT", PAD + 20, y - 2)
-    e:SetText(Failed(id, text) or "")
-    e:SetScript("OnEnterPressed", function(self)
-        SetFail(id, text, Trim(self:GetText()))
-        editing = nil
-        Layout()
+-- Free text box (under an item, or for a round note). Enter saves, Shift+Enter
+-- starts a new line, Esc closes and keeps what was already saved.
+-- ponytail: no scroll frame, so a very long text runs past the box while
+-- typing (all of it is saved). Add one if that bothers.
+local function NoteForm(body, y, indent, placeholder, initial, onSave)
+    local e = CreateFrame("EditBox", nil, body, "BackdropTemplate")
+    e:SetPoint("TOPLEFT", indent, y - 2)
+    e:SetSize(W - PAD - indent, 48)
+    Panel(e, 0.031, 1)
+    e:SetMultiLine(true)
+    e:SetAutoFocus(false)
+    e:SetFont(FontPath(), 11, "OUTLINE")
+    e:SetTextInsets(5, 5, 4, 4)
+    e:SetMaxLetters(TEXT_MAX)
+    local ph = Text(e, 11, MUTED)
+    ph:SetPoint("TOPLEFT", 5, -4)
+    ph:SetText(placeholder)
+    ph:SetShown((initial or "") == "")
+    e:SetText(initial or "")
+    e:SetScript("OnTextChanged", function(self)
+        ph:SetShown(self:GetText() == "")
+        if editing then editing.draft = self:GetText() end
     end)
+    e:SetScript("OnEnterPressed", function(self)
+        if IsShiftKeyDown() then self:Insert("\n") return end
+        onSave(Trim(self:GetText()))
+    end)
+    e:SetScript("OnEscapePressed", function(self) self:ClearFocus(); editing = nil; Layout() end)
+    e:HookScript("OnEditFocusGained", function(self) self:SetBackdropBorderColor(Brand()) end)
+    e:HookScript("OnEditFocusLost", function(self) self:SetBackdropBorderColor(0, 0, 0, 1) end)
     e:SetFocus()
-    return 26
+    return 54
+end
+
+-- Saved text as one short line for a row (the full text stays in saved data).
+local function Short(t)
+    t = t:gsub("[\r\n]+", " "):gsub("|", "||")
+    return #t > 120 and (t:sub(1, 117) .. "...") or t
+end
+
+local LIMITS = "Nothing leaves the game until you /reload or log out. The addon cannot press protected buttons. "
+    .. "Checks and Set Up wait for combat to end. A check proves state, never how something looks. (? hides this.)"
+
+local function SayNote(id, general)
+    if id then Print(general and "note saved to General (no round open)." or ("note saved to " .. id .. ".")) end
 end
 
 -- Paste box for a markdown list; Import adds it, Esc closes.
@@ -733,6 +983,48 @@ Layout = function()
     local accent = Accent()
     local y, open, any = -6, 0, false
     local formTop, formH
+    local rounds = Rounds()
+
+    -- Tools: run the checks, write a note, take a screenshot, show the limits.
+    local hasChecks = false
+    for _, r in ipairs(rounds) do
+        for _, it in ipairs(r.items) do if it.kind == "check" then hasChecks = true end end
+    end
+    local tx = PAD
+    local function Tool(label, width, fn)
+        local b = Button(body, label, width)
+        b:SetHeight(18)
+        b:SetPoint("TOPLEFT", tx, y)
+        b:SetScript("OnClick", fn)
+        tx = tx + width + 4
+    end
+    if hasChecks then
+        Tool("Run Checks", 76, function()
+            local n, bad = DC:RunChecks()
+            if n then Print(n .. (n == 1 and " check ran, " or " checks ran, ") .. bad .. " failed.") end
+        end)
+    end
+    Tool("Note", 40, function()
+        if editing and editing.kind == "roundnote" then editing = nil else editing = { kind = "roundnote" } end
+        Layout()
+    end)
+    Tool("Capture", 56, function() DC:Capture() end)
+    Tool("?", 20, function() db.limits = db.limits == false; Layout() end)
+    y = y - 22
+    if checksWaiting then
+        local wait = Text(body, 11, FAIL)
+        wait:SetPoint("TOPLEFT", PAD, y - 2)
+        wait:SetText("In combat: the checks run when it ends.")
+        y = y - 18
+    end
+    if db.limits ~= false then
+        local lim = Text(body, 10, NOTE)
+        lim:SetPoint("TOPLEFT", PAD, y - 2)
+        lim:SetWidth(W - 2 * PAD)
+        lim:SetWordWrap(true)
+        lim:SetText(LIMITS)
+        y = y - (lim:GetStringHeight() + 8)
+    end
 
     if editing and editing.kind == "group" then
         local name = Field(body, W - 2 * PAD, "New group name")
@@ -751,14 +1043,27 @@ Layout = function()
         formTop = -y
         formH = ImportForm(body, y)
         y = y - formH
+    elseif editing and editing.kind == "roundnote" then
+        formTop = -y
+        formH = NoteForm(body, y, PAD, "Note for the open round. Enter saves, Shift+Enter starts a new line", editing.draft,
+            function(t)
+                editing = nil
+                SayNote(DC:Note(t))
+                Layout()
+            end)
+        y = y - formH
     end
 
-    for _, r in ipairs(Rounds()) do
+    for _, r in ipairs(rounds) do
         any = true
-        local done, nfail = Tally(r)
-        open = open + #r.items - done
+        local done, nfail, total = Tally(r)
+        open = open + total - done
+        local settled = true
+        for _, it in ipairs(r.items) do
+            if not Done(r.id, it.text) and not (it.kind == "needs" and Needs(r.id, it.text)) then settled = false end
+        end
         local adding = editing and editing.kind == "task" and editing.id == r.id
-        local folded = not adding and #r.items > 0 and Folded(r, done)
+        local folded = not adding and #r.items > 0 and Folded(r, settled)
 
         local h = CreateFrame("Button", nil, body)
         h:SetPoint("TOPLEFT", 0, y)
@@ -774,7 +1079,7 @@ Layout = function()
         end)
         local hc = Text(h, 11, NOTE)
         hc:SetPoint("RIGHT", plus, "LEFT", -4, 0)
-        hc:SetText(CountText(done, #r.items, nfail))
+        hc:SetText(CountText(done, total, nfail))
         local ht = Text(h, 12)
         ht:SetPoint("LEFT", PAD, 0)
         ht:SetPoint("RIGHT", hc, "LEFT", -6, 0)
@@ -804,16 +1109,20 @@ Layout = function()
         end
         y = y - 24
 
-        local lastArea
-        for _, it in ipairs(folded and {} or r.items) do
-            if it.area ~= "" and it.area ~= lastArea then
-                local a = Text(body, 11, NOTE)
-                a:SetPoint("TOPLEFT", PAD, y - 4)
-                a:SetText(it.area)
-                y = y - 18
-            end
-            lastArea = it.area
+        -- A heading inside a round: "Checked by code", "Needs a situation".
+        local function Section(title, detail)
+            local t = Text(body, 11)
+            t:SetPoint("TOPLEFT", PAD, y - 4)
+            t:SetWidth(W - 2 * PAD)
+            t:SetWordWrap(false)
+            t:SetText(title .. "  |cff9a9a9a" .. detail .. "|r")
+            y = y - 18
+        end
 
+        -- One look or needs task: the row (left click passes, right click
+        -- fails and asks what is off; again to clear), the answer buttons
+        -- while it is not passed, and the text box when one is open for it.
+        local function TaskRow(it)
             local row = CreateFrame("Button", nil, body)
             row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             row:SetPoint("TOPLEFT", 0, y)
@@ -824,37 +1133,44 @@ Layout = function()
             fs:SetPoint("TOPLEFT", PAD + 20, -4)
             fs:SetWidth(W - 2 * PAD - 20 - (it.parked and 16 or 0))
             fs:SetWordWrap(true)
-            local send = (type(it.send) == "string" and it.send ~= "") and ("  |cff9a9a9a" .. it.send .. "|r") or ""
-            local function Paint()
-                local on, note = Done(r.id, it.text), Failed(r.id, it.text)
-                local c = note and FAIL or (on and MUTED) or { 1, 1, 1 }
-                box.fill:SetColorTexture(note and FAIL[1] or br, note and FAIL[2] or bg, note and FAIL[3] or bb, 0.8)
-                box.fill:SetShown(on or note ~= nil)
-                fs:SetTextColor(c[1], c[2], c[3])
-                fs:SetText(it.text .. send .. ((note and note ~= "") and ("  |cffe64d4d" .. note .. "|r") or ""))
+            local on, note, ans = Done(r.id, it.text), Failed(r.id, it.text), Needs(r.id, it.text)
+            local c = note and FAIL or ((on or ans) and MUTED) or { 1, 1, 1 }
+            box.fill:SetColorTexture(note and FAIL[1] or br, note and FAIL[2] or bg, note and FAIL[3] or bb, 0.8)
+            box.fill:SetShown(on or note ~= nil)
+            fs:SetTextColor(c[1], c[2], c[3])
+            local extra = ""
+            if it.kind == "needs" and type(it.needs) == "string" and it.needs ~= "" then
+                extra = "  |cff9a9a9aneeds: " .. Short(it.needs) .. "|r"
             end
-            Paint()
-            -- Left click passes (again to clear); right click fails and asks for a note (again to clear).
+            if type(it.send) == "string" and it.send ~= "" then extra = extra .. "  |cff9a9a9a" .. it.send .. "|r" end
+            if note and note ~= "" then
+                extra = extra .. "  |cffe64d4d" .. Short(note) .. "|r"
+            elseif on and Remark(r.id, it.text) then
+                extra = extra .. "  |cff9a9a9a" .. Short(Remark(r.id, it.text)) .. "|r"
+            elseif ans then
+                extra = extra .. "  |cff9a9a9a(" .. (ans == "skip" and "skipped" or "couldn't") .. ")|r"
+            end
+            fs:SetText(it.text .. extra)
+            local function Off()
+                if Failed(r.id, it.text) == nil then SetFail(r.id, it.text, "") end
+                editing = { kind = "note", id = r.id, text = it.text }
+                Layout()
+            end
             row:SetScript("OnClick", function(_, button)
-                local wasFailed = Failed(r.id, it.text) ~= nil
                 if button == "RightButton" then
-                    if wasFailed then
+                    if Failed(r.id, it.text) ~= nil then
                         SetFail(r.id, it.text, nil)
                         editing = nil
+                        Layout()
                     else
-                        SetFail(r.id, it.text, "")
-                        editing = { kind = "note", id = r.id, text = it.text }
+                        Off()
                     end
-                    Layout()
                     return
                 end
-                -- A left click moves on: close an open note box (this item's or another's).
-                if editing and editing.kind == "note" then editing = nil; wasFailed = true end
+                -- A left click moves on: close an open text box (this item's or another's).
+                if editing and editing.kind == "note" then editing = nil end
                 SetDone(r.id, it.text, not Done(r.id, it.text))
-                if wasFailed then Layout() return end
-                Paint()
-                local p, f = Tally(r)
-                hc:SetText(CountText(p, #r.items, f))
+                Layout()
             end)
             if it.parked then
                 local del = XButton(row, 7, "Delete Task")
@@ -864,10 +1180,100 @@ Layout = function()
             local rh = math.max(20, fs:GetStringHeight() + 8)
             row:SetSize(W, rh)
             y = y - rh
+            -- Answer buttons (round tasks only; a task you added yourself is just clicked).
+            if not on and not it.parked then
+                local sx = PAD + 20
+                local function Act(label, width, fn)
+                    local b = Button(body, label, width)
+                    b:SetHeight(18)
+                    b:SetPoint("TOPLEFT", sx, y)
+                    b:SetScript("OnClick", fn)
+                    sx = sx + width + 4
+                end
+                if it.kind == "needs" then
+                    Act("Did It", 50, function() editing = nil; SetDone(r.id, it.text, true); Layout() end)
+                    Act("Couldn't", 60, function() editing = nil; SetNeeds(r.id, it.text, "couldnt"); Layout() end)
+                    Act("Skip", 40, function() editing = nil; SetNeeds(r.id, it.text, "skip"); Layout() end)
+                else
+                    if it.setup then Act("Set Up", 50, function() SetUp(it) end) end
+                    Act("Looks Right", 76, function()
+                        SetDone(r.id, it.text, true)
+                        editing = { kind = "note", id = r.id, text = it.text, remark = true }
+                        Layout()
+                    end)
+                    Act("Something's Off", 100, Off)
+                    Act("Capture", 56, function() DC:Capture(r.id, it.text) end)
+                end
+                y = y - 22
+            end
             if editing and editing.kind == "note" and editing.id == r.id and editing.text == it.text then
+                local remark = editing.remark
                 formTop = -y
-                formH = NoteForm(body, y, r.id, it.text)
+                formH = NoteForm(body, y, PAD + 20,
+                    remark and "Anything to add? Enter saves, Esc skips" or "What is off? Enter saves",
+                    editing.draft or (remark and Remark(r.id, it.text)) or (not remark and Failed(r.id, it.text)) or "",
+                    function(t)
+                        if remark then SetRemark(r.id, it.text, t) else SetFail(r.id, it.text, t) end
+                        editing = nil
+                        Layout()
+                    end)
                 y = y - formH
+            end
+        end
+
+        if not folded then
+            -- The tester's part first: what needs eyes and feel.
+            local lastArea
+            local nCheck, okCheck, nNeeds = 0, 0, 0
+            for _, it in ipairs(r.items) do
+                if it.kind == "check" then
+                    nCheck = nCheck + 1
+                    if Done(r.id, it.text) then okCheck = okCheck + 1 end
+                elseif it.kind == "needs" then
+                    nNeeds = nNeeds + 1
+                else
+                    if it.area ~= "" and it.area ~= lastArea then
+                        local a = Text(body, 11, NOTE)
+                        a:SetPoint("TOPLEFT", PAD, y - 4)
+                        a:SetText(it.area)
+                        y = y - 18
+                    end
+                    lastArea = it.area
+                    TaskRow(it)
+                end
+            end
+
+            -- Checked by code: one line when all pass, else the ones that do not.
+            if nCheck > 0 then
+                Section("Checked by code", okCheck == nCheck and ("all " .. nCheck .. " pass") or (okCheck .. "/" .. nCheck .. " pass"))
+                for _, it in ipairs(r.items) do
+                    if it.kind == "check" and not Done(r.id, it.text) then
+                        local value = Failed(r.id, it.text)
+                        local row = CreateFrame("Frame", nil, body)
+                        row:SetPoint("TOPLEFT", 0, y)
+                        local box = Box(row)
+                        box:SetPoint("TOPLEFT", PAD, -3)
+                        box.fill:SetColorTexture(FAIL[1], FAIL[2], FAIL[3], 0.8)
+                        box.fill:SetShown(value ~= nil)
+                        local fs = Text(row, 11, value and FAIL or nil)
+                        fs:SetPoint("TOPLEFT", PAD + 20, -4)
+                        fs:SetWidth(W - 2 * PAD - 20)
+                        fs:SetWordWrap(true)
+                        fs:SetText(it.text .. (value and ("  " .. Short(value ~= "" and value or "failed"))
+                            or "  |cff9a9a9anot run yet|r"))
+                        local rh = math.max(20, fs:GetStringHeight() + 8)
+                        row:SetSize(W, rh)
+                        y = y - rh
+                    end
+                end
+            end
+
+            -- Needs a situation: said up front that the addon cannot test these.
+            if nNeeds > 0 then
+                Section("Needs a situation", "the addon cannot test these; right click: tried, failed")
+                for _, it in ipairs(r.items) do
+                    if it.kind == "needs" then TaskRow(it) end
+                end
             end
         end
 
@@ -931,25 +1337,47 @@ local function WriteReport()
     db.report = {}
     for _, r in ipairs(Rounds()) do
         if #r.items > 0 then
-            local pass, fails = 0, {}
+            -- Looks and checks are counted; needs items are listed apart and
+            -- never keep the round from reading as passed.
+            local pass, open, fails, needs = 0, 0, {}, {}
             for _, it in ipairs(r.items) do
-                if Done(r.id, it.text) then
+                local note = Failed(r.id, it.text)
+                if it.kind == "needs" then
+                    needs[#needs + 1] = { text = it.text, needs = Cap(it.needs, VALUE_MAX), note = note,
+                        answer = Done(r.id, it.text) and "pass" or note and "fail" or Needs(r.id, it.text) or "open" }
+                elseif Done(r.id, it.text) then
                     pass = pass + 1
-                elseif Failed(r.id, it.text) then
-                    fails[#fails + 1] = { text = it.text, note = Failed(r.id, it.text) }
+                elseif note then
+                    fails[#fails + 1] = { text = it.text, note = note, kind = it.kind }
+                else
+                    open = open + 1
                 end
             end
-            db.report[r.id] = { round = r.round, build = r.build, pass = pass, open = #r.items - pass - #fails, fail = fails }
+            db.report[r.id] = { round = r.round, build = r.build, pass = pass, open = open, fail = fails,
+                needs = needs, passed = open == 0 and #fails == 0 }
         end
     end
 end
 
-local ev = CreateFrame("Frame")
+ev = CreateFrame("Frame")
 ev:RegisterEvent("ADDON_LOADED")
 ev:RegisterEvent("PLAYER_LOGIN")
 ev:RegisterEvent("PLAYER_LOGOUT")
 ev:SetScript("OnEvent", function(_, event, name)
     if event == "PLAYER_LOGOUT" then WriteReport() return end
+    if event == "PLAYER_REGEN_ENABLED" then          -- watched only while checks wait for combat to end
+        if checksWaiting then DC:RunChecks() else ev:UnregisterEvent(event) end
+        return
+    end
+    if event == "PLAYER_ENTERING_WORLD" then         -- once after a login or reload, when a round has checks
+        ev:UnregisterEvent(event)
+        DC:RunChecks()
+        return
+    end
+    if event == "SCREENSHOT_SUCCEEDED" or event == "SCREENSHOT_FAILED" then   -- watched only after a capture
+        EndShot(event == "SCREENSHOT_SUCCEEDED" and "saved" or "failed")
+        return
+    end
     if event == "ADDON_LOADED" then
         if name ~= ADDON then return end
         DevChecklistDB = DevChecklistDB or {}
@@ -962,6 +1390,10 @@ ev:SetScript("OnEvent", function(_, event, name)
         db.log = db.log or {}
         db.snap = db.snap or {}
         db.notes = db.notes or {}
+        db.check = db.check or {}
+        db.needs = db.needs or {}
+        db.remark = db.remark or {}
+        db.shots = db.shots or {}
         for _, fn in ipairs(pending) do fn() end
         pending = nil
         ev:UnregisterEvent("ADDON_LOADED")
@@ -986,12 +1418,13 @@ ev:SetScript("OnEvent", function(_, event, name)
         local live = {}
         for _, r in ipairs(Rounds()) do live[r.id] = true end
         local stale = {}
-        for _, t in ipairs({ db.done, db.fail, db.snap, db.collapsed }) do
+        for _, t in ipairs({ db.done, db.fail, db.snap, db.collapsed, db.check, db.needs, db.remark }) do
             for id in pairs(t) do if not live[id] then stale[id] = true end end
         end
         if next(stale) then
             for id in pairs(stale) do
                 db.done[id], db.fail[id], db.snap[id], db.collapsed[id] = nil, nil, nil, nil
+                db.check[id], db.needs[id], db.remark[id] = nil, nil, nil
             end
             local keep = {}
             for _, line in ipairs(db.log) do
@@ -1000,17 +1433,22 @@ ev:SetScript("OnEvent", function(_, event, name)
             end
             db.log = keep
         end
-        -- Notes of a closed round go the same way ("General" has no round and stays).
-        for id in pairs(db.notes) do
-            if not live[id] and id ~= "General" then db.notes[id] = nil end
+        -- Notes and captures of a closed round go the same way ("General" has no round and stays).
+        for _, t in ipairs({ db.notes, db.shots }) do
+            for id in pairs(t) do
+                if not live[id] and id ~= "General" then t[id] = nil end
+            end
         end
     end
     Arm()
+    local show
     for _, r in ipairs(Rounds()) do
         for _, it in ipairs(r.items) do
-            if not Done(r.id, it.text) then DC:Show() return end
+            if it.kind == "check" then ev:RegisterEvent("PLAYER_ENTERING_WORLD") end   -- run them once the world is in
+            if it.kind ~= "needs" and not Done(r.id, it.text) then show = true end
         end
     end
+    if show then DC:Show() end
 end)
 
 SLASH_DEVCHECKLIST1 = "/dc"
@@ -1029,11 +1467,14 @@ SlashCmdList.DEVCHECKLIST = function(msg)
         DC:Clear(rest)
         Print(rest .. " cleared.")
     elseif cmd == "note" and rest ~= "" then
-        local id, general = DC:Note(rest)
-        if id then
-            Print(general and "note saved to General (no round open)." or ("note saved to " .. id .. "."))
-        end
+        SayNote(DC:Note(rest))
+    elseif cmd == "shot" then
+        DC:Capture()
+    elseif cmd == "run" then
+        local n, bad = DC:RunChecks()
+        Print(n and (n .. (n == 1 and " check ran, " or " checks ran, ") .. bad .. " failed.")
+            or "in combat: the checks run when it ends.")
     else
-        Print("|cffffffff/dc|r show or hide  |cffffffff/dc add [area:] text|r park an item  |cffffffff/dc note text|r note for the open round  |cffffffff/dc clear <round>|r drop a round and its ticks")
+        Print("|cffffffff/dc|r show or hide  |cffffffff/dc add [area:] text|r park an item  |cffffffff/dc note text|r note for the open round  |cffffffff/dc shot|r screenshot  |cffffffff/dc run|r run the checks  |cffffffff/dc clear <round>|r drop a round and its ticks")
     end
 end

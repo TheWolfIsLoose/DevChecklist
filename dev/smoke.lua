@@ -45,6 +45,25 @@ InCombatLockdown = function() return inCombat end
 GetSpecialization = function() return 2 end
 GetSpecializationInfo = function(i) return 63, "Fire" end
 GetNumGroupMembers = function() return 0 end
+-- the rest of what a fail or note reads about the surroundings
+GetSubZoneText = function() return "The Stalls" end
+UnitLevel = function() return 80 end
+IsInRaid = function() return false end
+IsInGroup = function() return false end
+GetPhysicalScreenSize = function() return 3840, 2160 end
+GetBuildInfo = function() return "12.0.0", "12345" end
+GetFramerate = function() return 59.6 end
+GetNetStats = function() return 1, 2, 20, 30 end
+local function Named(name, shown, forbidden)
+  return { IsForbidden = function() return forbidden end, IsShown = function() return shown end, GetName = function() return name end }
+end
+GetMouseFoci = function() return { Named("MouseFrameName", true) } end
+rawset(UIParent, "GetChildren", function()
+  return Named("ShownOne", true), Named("HiddenOne", false), Named("Locked", true, true), Named(nil, true), Named("ShownTwo", true)
+end)
+local shiftDown, shots = false, 0
+IsShiftKeyDown = function() return shiftDown end
+Screenshot = function() shots = shots + 1 end
 -- an error catcher that announces errors by id through the game's event registry
 local bugCb
 EventRegistry = {
@@ -62,17 +81,21 @@ local DC = DevChecklist
 if arg[2] then
   dofile(arg[2])
   assert(type(DevChecklistDB) == "table", "the file sets DevChecklistDB")
+  DevChecklist_Rounds.Demo.items[3] = { kind = "check", text = "Saved data is a table.", run = function() return type(DevChecklistDB) == "table", type(DevChecklistDB) end }
+  DevChecklist_Rounds.Demo.items[4] = { kind = "needs", text = "Works in a raid.", needs = "a raid group" }
   handlers[1](nil, "ADDON_LOADED", "DevChecklist")
   handlers[1](nil, "PLAYER_LOGIN")
+  handlers[1](nil, "PLAYER_ENTERING_WORLD", false, true)
+  assert(DevChecklistDB.check.Demo["Saved data is a table."].ok == true, "check ran after the reload")
   DC:Show()
   DC:Log("Demo", "after login")
   handlers[1](nil, "PLAYER_LOGOUT")
   local sv = DevChecklistDB
-  for _, k in ipairs({ "done", "fail", "snap", "notes", "log", "parked", "groups", "collapsed", "report" }) do
+  for _, k in ipairs({ "done", "fail", "snap", "notes", "log", "parked", "groups", "collapsed", "report", "check", "needs", "remark", "shots" }) do
     assert(type(sv[k]) == "table", "DevChecklistDB." .. k .. " is a table")
   end
   assert(sv.v == 2 and #sv.log <= 100 and sv.log[#sv.log]:find("[Demo] after login", 1, true), "version, log cap, recording")
-  assert(sv.report.Demo and sv.report.Demo.open == 2, "report written for the loaded round")
+  assert(sv.report.Demo and sv.report.Demo.open == 2 and sv.report.Demo.pass == 1 and #sv.report.Demo.needs == 1, "report written for the loaded round")
   io.write("SAVED DATA OK\n")
   return
 end
@@ -275,7 +298,7 @@ do
   -- /dc note: lands on the open round, stamped; General when none is open
   SlashCmdList.DEVCHECKLIST("note   bars flicker at the bank ")
   local nt = db.notes.Again and db.notes.Again[1]
-  assert(nt and nt.text == "bars flicker at the bank" and nt.zone == "Dornogal" and nt.at and nt.spec == "Fire" and not nt.log, "note on the open round")
+  assert(nt and nt.text == "bars flicker at the bank" and nt.zone == "Dornogal" and nt.at and nt.spec == "Fire" and type(nt.log) == "table", "note on the open round")
   assert(printed[#printed]:find("note saved to Again.", 1, true), "note confirm line")
   DC:Register("Second", "r3", { {"a", "S1"} })
   DC:Add("Second", "a", "S2")
@@ -307,6 +330,223 @@ do
   assert(db.log[#db.log]:find("error: boom in File.lua:1", 1, true), "error logged: " .. db.log[#db.log])
   for id in pairs(DevChecklist_Rounds) do DC:Clear(id) end
   assert(not bugCb, "error listener removed when no round is open")
+end
+-- task kinds: look (with setup), check, needs, beside old-format tasks
+do
+  local db = DevChecklistDB
+  local reg = {}                                     -- events our frame watches from here on
+  rawset(ALL[1], "RegisterEvent", function(_, e) reg[e] = true end)
+  rawset(ALL[1], "UnregisterEvent", function(_, e) reg[e] = nil end)
+  local mark = #KIDS
+  local function Redraw() mark = #KIDS; DC:Show() end
+  local function Seen(text)                          -- a text drawn by the last Redraw
+    for i = mark + 1, #KIDS do
+      if type(KIDS[i]._text) == "string" and KIDS[i]._text:find(text, 1, true) then return KIDS[i], i end
+    end
+  end
+  local function Btn(label, after)                   -- a button from the last Redraw (the first one after a task's row)
+    local _, from = Seen(after or "")
+    for i = from or mark + 1, #KIDS do
+      if KIDS[i]._text == label and KIDS[i]._parent._OnClick then return KIDS[i]._parent end
+    end
+  end
+  local function Click(label, after, button) Redraw(); local b = assert(Btn(label, after), "no button " .. label); b._OnClick(b, button) end
+  local function NoteBox() for i = #ALL, 1, -1 do if ALL[i]._type == "EditBox" and ALL[i]._OnEnterPressed then return ALL[i] end end end
+
+  for id in pairs(DevChecklist_Rounds) do DC:Clear(id) end
+  local setupRan, state, slashArg = 0, 1, nil
+  SLASH_SMOKEADDON1 = "/smokeaddon"
+  SlashCmdList.SMOKEADDON = function(msg) slashArg = msg end
+  DC:Register("K", "kinds", {
+    "A plain string task",
+    { "area", "Old style task", "yes / no" },
+    { kind = "look", text = "Panel looks right", setup = function() setupRan = setupRan + 1 end },
+    { kind = "look", text = "Slash look", setup = "/SmokeAddon open now" },
+    { kind = "look", text = "Bad setup", setup = "/nosuchcommand" },
+    { kind = "check", text = "State is one", run = function() return state == 1, state end },
+    { kind = "check", text = "Errors out", run = function() error("kaboom") end },
+    { kind = "check", text = "Long value", run = function() return true, ("v"):rep(500) end },
+    { kind = "needs", text = "Works in a group", needs = "a group of five" },
+    { kind = "needs", text = "Works on a keypress", needs = "a hardware key press" },
+  }, "b1")
+  local p, n = DC:Progress("K"); assert(p == 0 and n == 8, "needs tasks are not counted: " .. p .. "/" .. n)
+
+  -- checks never run in combat: they wait, the window says so, and they run when it ends
+  inCombat = true
+  assert(DC:RunChecks() == nil and not db.check.K and reg.PLAYER_REGEN_ENABLED, "checks wait in combat")
+  Redraw(); assert(Seen("In combat: the checks run when it ends."), "window says the checks wait")
+  inCombat = false
+  fire(nil, "PLAYER_REGEN_ENABLED")
+  assert(not reg.PLAYER_REGEN_ENABLED, "combat end is no longer watched")
+  local c = db.check.K
+  assert(c["State is one"].ok == true and c["State is one"].value == "1" and c["State is one"].at:match("^%d+%-%d+%-%d+ %d+:%d+:%d+$"), "check pass, value, time")
+  assert(db.done.K["State is one"] and db.done.K["Long value"] and #c["Long value"].value == 200, "passes ticked, value capped")
+  assert(c["Errors out"].ok == false and c["Errors out"].value:find("kaboom", 1, true), "an error is a fail with the error text")
+  assert(db.fail.K["Errors out"]:find("kaboom", 1, true) and not db.snap.K, "check fail saved, no surroundings for a check")
+
+  -- the window: looks, then Checked by code (only the failure listed), then Needs a situation
+  Redraw()
+  local _, iLook = Seen("A plain string task")
+  local sec, iCheck = Seen("Checked by code")
+  local _, iNeeds = Seen("Needs a situation")
+  assert(iLook and iCheck and iNeeds and iLook < iCheck and iCheck < iNeeds, "section order")
+  assert(sec._text:find("2/3 pass", 1, true) and Seen("Errors out") and not Seen("State is one"), "only failed checks are listed")
+  assert(Seen("needs: a group of five") and Seen("the addon cannot test these"), "needs say what they need")
+  assert(Seen("Nothing leaves the game until you /reload"), "limits shown up front")
+  Click("?"); Redraw()
+  assert(db.limits == false and not Seen("Nothing leaves the game"), "? folds the limits")
+  Click("?"); Redraw(); assert(Seen("Nothing leaves the game"), "? shows them again")
+
+  -- Run Checks button and /dc run
+  state = 2; Click("Run Checks")
+  assert(c["State is one"].ok == false and c["State is one"].value == "2" and db.fail.K["State is one"] == "2" and not db.done.K["State is one"], "a check can turn to fail")
+  state = 1; SlashCmdList.DEVCHECKLIST("run")
+  assert(db.check.K["State is one"].ok and db.done.K["State is one"] and db.fail.K["State is one"] == nil, "and back to pass")
+  assert(printed[#printed]:find("3 checks ran, 1 failed", 1, true), "run line: " .. printed[#printed])
+
+  -- once after a login or reload, when a round has checks
+  db.check.K = nil
+  fire(nil, "PLAYER_LOGIN")
+  assert(reg.PLAYER_ENTERING_WORLD and not db.check.K, "checks wait for the world after a reload")
+  fire(nil, "PLAYER_ENTERING_WORLD", false, true)
+  assert(db.check.K["State is one"].ok and not reg.PLAYER_ENTERING_WORLD, "ran once, no longer watched")
+
+  -- Set Up: refused in combat, a function, an addon slash command, a bad command
+  inCombat = true; Click("Set Up", "Panel looks right")
+  assert(setupRan == 0 and printed[#printed]:find("Set Up waits for combat to end", 1, true), "setup refused in combat")
+  inCombat = false; Click("Set Up", "Panel looks right"); assert(setupRan == 1, "setup function ran")
+  Click("Set Up", "Slash look"); assert(slashArg == "open now", "setup slash command ran: " .. tostring(slashArg))
+  Click("Set Up", "Bad setup"); assert(printed[#printed]:find("Set Up failed: no addon command /nosuchcommand", 1, true), "bad setup says so")
+
+  -- Looks Right, with text of any length (capped at 4000)
+  Click("Looks Right", "Panel looks right")
+  local box = NoteBox(); box._text = ("y"):rep(5000); box._OnEnterPressed(box)
+  assert(db.done.K["Panel looks right"] and #db.remark.K["Panel looks right"] == 4000, "pass with text")
+  Redraw(); assert(Seen(("y"):rep(117) .. "..."), "the row shows the start of the text")
+
+  -- Something's Off: the surroundings are saved, the text can have several lines
+  Click("Something's Off", "Slash look")
+  local s = db.snap.K["Slash look"]
+  assert(db.fail.K["Slash look"] == "" and s.round == "K" and s.task == "Slash look" and s.build == "b1", "fail with round and task")
+  assert(s.zone == "Dornogal" and s.subzone == "The Stalls" and s.combat == "no" and s.spec == "Fire" and s.level == 80, "place and character")
+  assert(s.group == 0 and s.groupType == "solo" and s.screen == "3840x2160" and s.uiScale == "1.000", "group and screen")
+  assert(s.client == "12.0.0 (12345)" and s.fps == 60 and s.latency == "20 / 30 ms" and s.mouse == "MouseFrameName", "client, fps, latency, mouse")
+  assert(#s.frames == 2 and s.frames[1] == "ShownOne" and s.frames[2] == "ShownTwo", "shown named frames only")
+  assert(s.error and s.error:find("boom in File.lua:1", 1, true) and #s.log <= 20 and not s.instance, "last error and log lines")
+  box = NoteBox()
+  shiftDown = true; box._text = "line one"; box._OnEnterPressed(box)
+  assert(db.fail.K["Slash look"] == "", "Shift+Enter does not save")
+  shiftDown = false; box._text = " line one\nline two "; box._OnEnterPressed(box)
+  assert(db.fail.K["Slash look"] == "line one\nline two" and db.snap.K["Slash look"] == s, "several lines saved, surroundings kept")
+  Redraw(); assert(Seen("line one line two"), "the row shows it on one line")
+
+  -- a failing or missing game function leaves its field out, nothing breaks
+  local oldNet, oldLevel, oldKids = GetNetStats, UnitLevel, rawget(UIParent, "GetChildren")
+  GetNetStats = function() error("no net") end; UnitLevel = nil
+  rawset(UIParent, "GetChildren", function() error("no children") end)
+  SlashCmdList.DEVCHECKLIST("note still works")
+  local nt = db.notes.K[#db.notes.K]
+  assert(nt.text == "still works" and nt.latency == nil and nt.level == nil and nt.frames == nil and nt.zone == "Dornogal", "guarded reads")
+  GetNetStats, UnitLevel = oldNet, oldLevel; rawset(UIParent, "GetChildren", oldKids)
+
+  -- an instance shows in the surroundings
+  local oldInfo = GetInstanceInfo; GetInstanceInfo = function() return "The Depths", "party", 23, "Mythic" end
+  -- the Note box in the window: any length up to 4000, with the surroundings
+  Click("Note"); box = NoteBox(); box._text = ("n"):rep(5000); box._OnEnterPressed(box)
+  nt = db.notes.K[#db.notes.K]
+  assert(#nt.text == 4000 and nt.round == "K" and nt.instance == "The Depths / party / Mythic" and #nt.frames == 2 and type(nt.log) == "table", "window note with surroundings")
+  GetInstanceInfo = oldInfo
+
+  -- needs: Couldn't, Skip, Did It, and a right click for tried-and-failed
+  Click("Couldn't", "Works in a group"); Click("Skip", "Works on a keypress")
+  assert(db.needs.K["Works in a group"] == "couldnt" and db.needs.K["Works on a keypress"] == "skip", "needs answers")
+  Redraw(); assert(Seen("(couldn't)") and Seen("(skipped)"), "answers shown")
+  Click("Did It", "Works in a group")
+  assert(db.done.K["Works in a group"] and db.needs.K["Works in a group"] == nil, "Did It passes and replaces the answer")
+  Redraw(); local row = Seen("Works on a keypress")._parent; row._OnClick(row, "RightButton")
+  assert(db.fail.K["Works on a keypress"] == "" and not db.needs.K, "right click fails a needs task")
+  p, n = DC:Progress("K"); assert(n == 8, "still 8 counted")
+
+  -- report: needs listed apart, never holding the round back
+  fire(nil, "PLAYER_LOGOUT")
+  local rep = db.report.K
+  assert(rep.pass + rep.open + #rep.fail == 8 and rep.passed == false and #rep.needs == 2, "report counts looks and checks")
+  assert(rep.needs[1].answer == "pass" and rep.needs[1].needs == "a group of five" and rep.needs[2].answer == "fail", "report needs list")
+  local kinds = {}; for _, e in ipairs(rep.fail) do kinds[e.text] = e.kind end
+  assert(kinds["Errors out"] == "check" and kinds["Slash look"] == "look", "report fails carry the kind")
+  DC:Register("N", "r", { "Only look", { kind = "needs", text = "Edge", needs = "a raid" } })
+  Redraw(); row = Seen("Only look")._parent; row._OnClick(row, "LeftButton")
+  fire(nil, "PLAYER_LOGOUT")
+  assert(db.report.N.passed == true and db.report.N.needs[1].answer == "open" and db.report.N.open == 0, "an open needs task does not hold the round back")
+
+  -- capture: asked, then the game's answer; matched by time
+  local s0 = shots
+  local id, at = DC:Capture()
+  local list = db.shots[id]
+  assert(shots == s0 + 1 and list[#list].result == "asked" and list[#list].at == at and reg.SCREENSHOT_SUCCEEDED and reg.SCREENSHOT_FAILED, "capture asked")
+  fire(nil, "SCREENSHOT_SUCCEEDED")
+  assert(list[#list].result == "saved" and not reg.SCREENSHOT_SUCCEEDED and not reg.SCREENSHOT_FAILED, "capture saved, events dropped")
+  Click("Capture", "Bad setup")
+  assert(shots == s0 + 2 and db.shots.K[#db.shots.K].task == "Bad setup", "capture from a task")
+  fire(nil, "SCREENSHOT_FAILED"); assert(db.shots.K[#db.shots.K].result == "failed", "capture failed")
+  SlashCmdList.DEVCHECKLIST("shot"); assert(shots == s0 + 3, "/dc shot")
+  local oldShot = Screenshot; Screenshot = nil
+  id = DC:Capture("K", "no function")
+  assert(db.shots.K[#db.shots.K].result == "failed" and not reg.SCREENSHOT_SUCCEEDED, "no screenshot function: failed, nothing watched")
+  Screenshot = oldShot
+  for i = 1, 40 do DC:Capture("K", "many " .. i) end
+  assert(#db.shots.K == 30 and db.shots.K[30].task == "many 40", "captures capped at 30")
+
+  -- tools/results.lua prints all of it (run on a copy of what the game would save)
+  do
+    local function ser(v, out)
+      if type(v) == "table" then
+        out[#out + 1] = "{"
+        for k, x in pairs(v) do
+          out[#out + 1] = "[" .. (type(k) == "number" and k or ("%q"):format(k)) .. "]="
+          ser(x, out); out[#out + 1] = ","
+        end
+        out[#out + 1] = "}"
+      else
+        out[#out + 1] = type(v) == "string" and ("%q"):format(v) or tostring(v)
+      end
+    end
+    local out = { "DevChecklistDB = " }; ser(db, out)
+    local saved = os.tmpname()
+    local fh = assert(io.open(saved, "w")); fh:write(table.concat(out)); fh:close()
+    local outFile = os.tmpname()
+    local oldArg, oldPrint = arg, print
+    local got = {}
+    arg = { saved, "K" }; print = function(line) got[#got + 1] = line end
+    local ok, err = pcall(dofile, dir .. "/tools/results.lua")
+    arg, print = oldArg, oldPrint
+    os.remove(saved); os.remove(outFile)
+    assert(ok, "results.lua runs: " .. tostring(err))
+    local text = table.concat(got, "\n")
+    for _, want in ipairs({
+      "round passed: no", "[x] Panel looks right  -- yyy", "[FAIL] Slash look  -- line one", "subzone The Stalls",
+      "frames shown: ShownOne, ShownTwo", "== Checked by code", "[ok] State is one = 1", "[FAIL] Errors out = ",
+      "== Needs a situation", "[pass] Works in a group  (needs: a group of five)", "[fail] Works on a keypress",
+      "== Notes", "still works", "instance The Depths / party / Mythic", "== Captures", "| asked | many 11", "| asked | many 40",
+    }) do
+      assert(text:find(want, 1, true), "results.lua prints: " .. want)
+    end
+    assert(not text:find("[x] State is one", 1, true), "checks are not repeated under Passed")
+  end
+
+  -- closing: /dc clear drops everything; login drops a closed round's data, General stays
+  DC:Clear("K")
+  assert(not (db.check.K or db.needs.K or db.remark.K or db.shots.K or db.notes.K or db.fail.K or db.snap.K), "clear drops the new data too")
+  db.check.Gone, db.needs.Gone, db.remark.Gone, db.shots.Gone, db.shots.General = { x = { ok = true } }, { x = "skip" }, { x = "t" }, { {} }, { {} }
+  fire(nil, "PLAYER_LOGIN")
+  assert(not (db.check.Gone or db.needs.Gone or db.remark.Gone or db.shots.Gone) and db.shots.General, "login prunes closed rounds")
+
+  -- no round open: nothing watched, nothing recorded
+  for rid in pairs(DevChecklist_Rounds) do DC:Clear(rid) end
+  reg = {}
+  fire(nil, "PLAYER_LOGIN")
+  assert(not next(reg) and not bugCb, "no round: no events")
+  local before = #db.log; DC:Log("K", "nobody listening"); assert(#db.log == before, "no round: no log")
 end
 print = io.write
 io.write("SMOKE OK\n")
